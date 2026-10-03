@@ -1,0 +1,47 @@
+{
+  "network": "monad-testnet",
+  "chainId": 10143,
+  "rpcUrl": "https://testnet-rpc.monad.xyz",
+  "contracts": {
+    "TemplateMarketplace": {
+      "address": "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
+      "abi": "abi/TemplateMarketplace.json",
+      "deployTx": "0x3b8a03df05e53d270096ebafbea2749a8f7e83465327301916dbacc9fc253815",
+      "blockNumber": 67913228,
+      "deployedAt": "2026-10-03T19:31:11Z",
+      "verified": {
+        "sourcify": "exact_match",
+        "verifierUrl": "https://sourcify-api-monad.blockvision.org/"
+      },
+      "constructorArgs": {
+        "admin": "0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40",
+        "relayer": "0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40",
+        "royaltyBps": 1000,
+        "platformFeeBps": 0,
+        "feeRecipient": "0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40"
+      },
+      "roles": {
+        "DEFAULT_ADMIN_ROLE": ["0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40"],
+        "RELAYER_ROLE": ["0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40"]
+      }
+    }
+  },
+  "explorers": {
+    "monadvision": "https://testnet.monadvision.com/address/0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
+    "monadscan": "https://testnet.monadscan.com/address/0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e"
+  },
+  "smokeTest": {
+    "templates": {
+      "1": { "creator": "0x83e24B4DfF93883f01456fCb86c3CD371Dc3Ea48", "parentId": 0, "priceWei": "10000000000000000", "uri": "ipfs://smoke-test/original.json" },
+      "2": { "creator": "0x039ee5a5e40C9853621689CA3D46e8C9De7c887a", "parentId": 1, "priceWei": "10000000000000000", "uri": "ipfs://smoke-test/fork.json" }
+    },
+    "transactions": [
+      { "step": "fund buyer #1 (0.06 MON)", "tx": "0xd67205d6ba50144937065d20ebd5e49075a82b5c65bfbbf6b9b12311edfce4b3" },
+      { "step": "publishFor template 1 (original, creator = user wallet)", "tx": "0x67df3129260311223b77357881f70c312759a0cd3f05589025bc4cf78ade4e1b" },
+      { "step": "buy template 1 (buyer #1)", "tx": "0x4028c6ee4093a80b4b1c0465b39ae62b9e589dc6e07cd5a547c9338a18d3a22b" },
+      { "step": "publishFor template 2 (fork of 1)", "tx": "0x0f71e66e61adc531d193c4693e01be4562a839133cc15b91813bb011b7ba7d38" },
+      { "step": "fund buyer #2 (0.04 MON)", "tx": "0x7d0c11201360b7a55d75b1011b10b80c782ba63d92615be88ea3496080d4e6c2" },
+      { "step": "buy template 2 (buyer #2): 0.009 to fork creator, 0.001 royalty to user wallet", "tx": "0xffaa17450f7c264839ac98ce3ba4d90e7d4351e28e1dd060b52a5baf1637c319" }
+    ]
+  }
+}

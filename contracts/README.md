@@ -3,18 +3,30 @@
 Solidity contracts for the onchain study-template marketplace on **Monad**.
 Built with Foundry (>= 1.8, `network = "monad"`) and OpenZeppelin Contracts v5.4.
 
-## Status / addresses
+## Deployments
 
-| Network | Chain ID | TemplateMarketplace | Explorer |
+| Network | Chain ID | TemplateMarketplace | Verified |
 | --- | --- | --- | --- |
-| Monad testnet | 10143 | _not deployed yet (deployer wallet awaiting faucet funds)_ | https://testnet.monadvision.com |
+| Monad testnet | 10143 | [`0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e`](https://testnet.monadvision.com/address/0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e) | Sourcify `exact_match` |
 
-- Deployer / admin / relayer (testnet only): `0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40`
-- Predicted marketplace address if the deploy is the deployer's first transaction (nonce 0):
-  `0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e` (confirm in `broadcast/Deploy.s.sol/10143/run-latest.json`).
+- Deploy tx: [`0x3b8a03df05e53d270096ebafbea2749a8f7e83465327301916dbacc9fc253815`](https://testnet.monadscan.com/tx/0x3b8a03df05e53d270096ebafbea2749a8f7e83465327301916dbacc9fc253815)
+  (block 67913228, 2026-10-03 19:31 UTC).
+- Explorers: [MonadVision](https://testnet.monadvision.com/address/0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e),
+  [Monadscan](https://testnet.monadscan.com/address/0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e).
+- Admin + relayer (testnet-only key, kept outside the repo): `0x11de6e9D9Df8ed95f54CA35448a359a4f4a22e40`.
+- Config: `royaltyBps = 1000` (10% per ancestor level, max 3 levels), `platformFeeBps = 0`.
+- Machine-readable: [`deployments/monad-testnet.json`](deployments/monad-testnet.json) (address, ABI path,
+  deploy tx, constructor args, smoke-test transactions).
 - Network info (from https://docs.monad.xyz/developer-essentials/testnets):
   RPC `https://testnet-rpc.monad.xyz`, explorers https://testnet.monadvision.com and
   https://testnet.monadscan.com, faucet https://faucet.monad.xyz.
+
+### Live smoke test (2026-10-03)
+
+Template 1 (original, 0.01 MON, published via `publishFor` for creator `0x83e2...Ea48`) and
+template 2 (fork of 1, 0.01 MON). Buying template 2 paid 0.009 MON to the fork creator and a
+0.001 MON `RoyaltyPaid` (level 1) to the original creator in the same transaction; the contract
+kept 0 MON. Transaction hashes are listed in `deployments/monad-testnet.json`.
 
 ## Design
 
@@ -99,7 +111,7 @@ Deploy to Monad testnet (key lives outside the repo):
 ```sh
 set -a; source ../../monad-deployer.env; set +a   # MONAD_DEPLOYER_PRIVATE_KEY, MONAD_DEPLOYER_ADDRESS
 cast balance $MONAD_DEPLOYER_ADDRESS --ether --rpc-url monad_testnet
-forge script script/Deploy.s.sol --rpc-url monad_testnet --broadcast
+forge script script/Deploy.s.sol --rpc-url monad_testnet --broadcast --gas-estimate-multiplier 110
 # Optional env: RELAYER_ADDRESS, ROYALTY_BPS (1000), PLATFORM_FEE_BPS (0), FEE_RECIPIENT, DEPLOY_MOCK_USDC=true
 ```
 
@@ -115,11 +127,14 @@ forge verify-contract <MARKET_ADDRESS> src/TemplateMarketplace.sol:TemplateMarke
 Live smoke test (publish via relayer, buy from a fresh wallet, fork + buy, check the royalty split):
 
 ```sh
-MARKET=<MARKET_ADDRESS> ./script/smoke-test.sh
+MARKET=0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e CREATOR_A=<creator wallet> ./script/smoke-test.sh
+# Throwaway buyer/forker keys are saved (chmod 600) next to the deployer env file, outside the repo.
 ```
 
-Note: Monad charges gas by **gas limit**, not gas used. The full deploy estimate is ~3.9M gas
-(~0.8 MON at 203 gwei max fee on testnet), so fund the deployer with at least ~1.5 MON to cover deploy + smoke test.
+Note: Monad charges gas by **gas limit**, not gas used, so keep limits tight:
+`forge script ... --gas-estimate-multiplier 110` (the actual deploy used a 3,350,568 gas limit, ~0.335 MON
+at 100 gwei). Measured costs: `publishFor` ~131k gas, `buy` of a 1-level fork ~150k gas. The RPC rejects
+a transaction unless `balance >= value + gasLimit * maxFeePerGas` ("Signer had insufficient balance").
 
 ## Calling it from the Python API
 
@@ -141,7 +156,7 @@ from eth_utils import keccak, to_checksum_address
 
 RPC = "https://testnet-rpc.monad.xyz"
 CHAIN_ID = 10143
-MARKET = "0x..."                          # from the table above
+MARKET = "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e"  # Monad testnet
 relayer = Account.from_key(env.MONAD_RELAYER_PRIVATE_KEY)  # Worker secret, never in code
 
 def selector(sig: str) -> bytes:
