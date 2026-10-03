@@ -1,0 +1,9 @@
+{
+  "name": "edtech-monad-contracts",
+  "private": true,
+  "description": "Solidity dependencies for the Foundry project (installed via npm; run `npm ci` before `forge build`).",
+  "devDependencies": {
+    "@openzeppelin/contracts": "5.4.0",
+    "forge-std": "github:foundry-rs/forge-std#v1.11.0"
+  }
+}

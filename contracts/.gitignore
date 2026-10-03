@@ -1,0 +1,13 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/*/dry-run
+broadcast/**/dry-run
+
+# Dependencies (installed with `npm ci`)
+node_modules/
+
+# Secrets
+.env
+.env.*
+*.env
