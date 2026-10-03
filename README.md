@@ -96,6 +96,12 @@ Measure locally: `node api/tests/measure_webcrypto_es256.mjs` (see `api/tests/RE
 
 Wallet address is derived from a verified identity token or Privy's server API with the App Secret — **never** from the client body.
 
+### Same-origin session cookies
+
+`*.workers.dev` is on the public suffix list, so `edtech-monad-web` and `edtech-monad-api` are different sites. The web Worker **proxies `/api/*`** to the API via the `API` service binding (`web/src/server.ts`). Browser calls stay same-origin (`/api/...`) so the `HttpOnly; Secure; SameSite=Lax` session cookie is sent. SSR loaders forward the incoming `Cookie` header through the binding.
+
+Public Privy App ID (non-secret): `cmusv5fsd01zn0cl383kjq1vk` (set as `PRIVY_APP_ID` / `VITE_PRIVY_APP_ID`).
+
 ### Follow-ups
 
 * Split the marketplace **relayer** role from **admin** (today the same EOA holds both on testnet).

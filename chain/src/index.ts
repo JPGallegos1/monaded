@@ -8,7 +8,14 @@
  * Secrets: RELAYER_PRIVATE_KEY
  * Vars: MARKETPLACE_ADDRESS, MONAD_RPC_URL, MONAD_CHAIN_ID
  */
-import { createWalletClient, http, publicActions, type Hex, type Address } from 'viem'
+import {
+  createWalletClient,
+  http,
+  publicActions,
+  parseEventLogs,
+  type Hex,
+  type Address,
+} from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { defineChain } from 'viem'
 
@@ -24,6 +31,19 @@ const marketplaceAbi = [
       { name: 'uri_', type: 'string' },
     ],
     outputs: [{ name: 'templateId', type: 'uint256' }],
+  },
+  {
+    type: 'event',
+    name: 'TemplatePublished',
+    inputs: [
+      { name: 'templateId', type: 'uint256', indexed: true },
+      { name: 'creator', type: 'address', indexed: true },
+      { name: 'parentId', type: 'uint256', indexed: true },
+      { name: 'price', type: 'uint256', indexed: false },
+      { name: 'paymentToken', type: 'address', indexed: false },
+      { name: 'metadataURI', type: 'string', indexed: false },
+      { name: 'publisher', type: 'address', indexed: false },
+    ],
   },
 ] as const
 
@@ -72,8 +92,14 @@ export default {
         if (!uri || typeof uri !== 'string') {
           return json({ error: 'uri required' }, 400)
         }
+        if (uri.length > 2048) {
+          return json({ error: 'uri too long' }, 400)
+        }
         const priceWei = BigInt(body.priceWei ?? 0)
         const parentId = BigInt(body.parentId ?? 0)
+        if (priceWei <= 0n) {
+          return json({ error: 'price must be positive' }, 400)
+        }
         if (!env.RELAYER_PRIVATE_KEY) {
           return json({ error: 'RELAYER_PRIVATE_KEY not configured' }, 503)
         }
@@ -98,10 +124,27 @@ export default {
           account,
           chain: monadTestnet,
         })
-        return json({ txHash: hash, relayer: account.address }, 200)
+
+        const receipt = await client.waitForTransactionReceipt({ hash })
+        let templateId: string | undefined
+        try {
+          const logs = parseEventLogs({
+            abi: marketplaceAbi,
+            eventName: 'TemplatePublished',
+            logs: receipt.logs,
+          })
+          if (logs[0]?.args?.templateId !== undefined) {
+            templateId = logs[0].args.templateId.toString()
+          }
+        } catch (parseErr) {
+          console.error('TemplatePublished parse failed', parseErr)
+        }
+
+        return json({ txHash: hash, relayer: account.address, templateId }, 200)
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        return json({ error: msg }, 502)
+        // Log full error server-side; return a generic message to callers.
+        console.error('publishFor failed', e)
+        return json({ error: 'publish transaction failed' }, 502)
       }
     }
     return json({ error: 'not found' }, 404)

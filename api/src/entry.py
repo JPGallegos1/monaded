@@ -34,9 +34,17 @@ from workers import Response, WorkerEntrypoint
 
 from privy_jwt import JwtError, JwksCache, verify_privy_jwt
 from privy_users import PrivyUserError, resolve_wallet_address
+from ownership import (
+    OwnershipError,
+    assert_can_publish,
+    build_publish_uri,
+    validate_publish_price,
+    validate_publish_uri,
+)
 from publish import PublishError, send_publish_for
 from purchase import PurchaseError, verify_purchase_tx
-from rate_limit_do import PublishRateLimitDO  # noqa: F401 — exported for wrangler DO binding
+from purchase_resolve import onchain_id_from_template, resolve_template_for_purchase
+from rate_limit_do import GLOBAL_DO_NAME, PublishRateLimitDO  # noqa: F401
 from session import (
     SESSION_COOKIE,
     create_session,
@@ -182,7 +190,11 @@ class Default(WorkerEntrypoint):
             return self._json(request, {"error": e.message, "code": e.code}, 400)
         except PurchaseError as e:
             status = 409 if e.code == "replay" else 400
+            if e.code == "not_found":
+                status = 404
             return self._json(request, {"error": e.message, "code": e.code}, status)
+        except OwnershipError as e:
+            return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except PublishError as e:
             status = 429 if e.code == "rate_limited" else 400
             if e.code in ("config", "chain"):
@@ -242,19 +254,22 @@ class Default(WorkerEntrypoint):
         return self._json(request, {"templates": rows or []})
 
     async def upsert_user(self, request):
+        """Update profile fields for the authenticated session user only."""
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            return self._json(request, {"error": str(e)}, 401)
         try:
             body = json.loads(await request.text())
         except Exception:  # noqa: BLE001
             return self._json(request, {"error": "invalid JSON body"}, 400)
         if not isinstance(body, dict):
             return self._json(request, {"error": "body must be a JSON object"}, 400)
-        privy_id = body.get("privy_user_id")
-        if not isinstance(privy_id, str) or not privy_id.strip():
-            return self._json(request, {"error": "privy_user_id is required"}, 400)
-        # Never trust client-supplied wallet_address for auth-sensitive flows.
-        # Legacy upsert still accepts profile fields; wallet should come from session.
-        row = {k: body[k] for k in USER_FIELDS if k in body and k != "wallet_address"}
-        row["privy_user_id"] = privy_id.strip()
+        # userId always from session — ignore any client privy_user_id
+        row = {k: body[k] for k in ("email", "display_name", "learning_style") if k in body}
+        row["privy_user_id"] = session["userId"]
+        # Wallet only from session (never from body)
+        row["wallet_address"] = session["walletAddress"]
         rows = await Supabase(self.env).upsert_user(row)
         user = rows[0] if isinstance(rows, list) and rows else rows
         return self._json(request, {"user": user})
@@ -355,12 +370,14 @@ class Default(WorkerEntrypoint):
         tx_hash = body.get("tx_hash") or body.get("txHash")
         onchain_id = body.get("onchain_template_id") or body.get("onchainTemplateId")
         template_id = body.get("template_id") or body.get("templateId")
-        if onchain_id is None:
-            raise HttpError(400, "onchain_template_id is required")
-        try:
-            onchain_id_int = int(onchain_id)
-        except (TypeError, ValueError):
-            raise HttpError(400, "onchain_template_id must be an integer")
+
+        sb = Supabase(self.env)
+        tpl = await resolve_template_for_purchase(
+            sb,
+            template_id=template_id if isinstance(template_id, str) else None,
+            onchain_template_id=onchain_id,
+        )
+        onchain_id_int = onchain_id_from_template(tpl)
 
         marketplace = _env_str(self.env, "MARKETPLACE_ADDRESS", "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e")
         rpc_url = _env_str(self.env, "MONAD_RPC_URL", "https://testnet-rpc.monad.xyz")
@@ -373,17 +390,15 @@ class Default(WorkerEntrypoint):
             rpc_url=rpc_url,
         )
 
-        sb = Supabase(self.env)
-        user_row = None
-        if sb.configured:
-            user_row = await sb.get_by("users", "privy_user_id", session["userId"])
+        user_row = await sb.get_by("users", "privy_user_id", session["userId"])
         purchase_row = {
             "tx_hash": matched["txHash"],
             "onchain_template_id": str(matched["templateId"]),
             "buyer_wallet": matched["buyer"],
             "creator_wallet": matched.get("creator"),
             "buyer_user_id": user_row["id"] if user_row else None,
-            "template_id": template_id if isinstance(template_id, str) else None,
+            # Always the DB-resolved UUID — never a client-supplied mapping.
+            "template_id": tpl["id"],
         }
         try:
             row = await sb.insert_purchase(purchase_row)
@@ -394,67 +409,84 @@ class Default(WorkerEntrypoint):
         return self._json(request, {"ok": True, "purchase": row, "event": matched}, 201)
 
     # ---- Publish (relayer) ------------------------------------------------
+    async def _check_publish_rate_limits(self, user_id: str):
+        """Per-user then global publish caps (fail closed)."""
+        try:
+            user_stub = self.env.PUBLISH_RATE_LIMITS.get(self.env.PUBLISH_RATE_LIMITS.idFromName(user_id))
+            user_resp = await user_stub.fetch(
+                "https://rate.internal/check",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"scope": "user"}),
+            )
+            if getattr(user_resp, "status", 500) == 429:
+                raise PublishError("publish rate limit exceeded", code="rate_limited")
+
+            global_stub = self.env.PUBLISH_RATE_LIMITS.get(
+                self.env.PUBLISH_RATE_LIMITS.idFromName(GLOBAL_DO_NAME)
+            )
+            global_resp = await global_stub.fetch(
+                "https://rate.internal/check",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"scope": "global"}),
+            )
+            if getattr(global_resp, "status", 500) == 429:
+                raise PublishError("global publish rate limit exceeded", code="rate_limited")
+        except PublishError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log("rate_limit_error", error=repr(e))
+            raise HttpError(503, "rate limiter unavailable")
+
     async def publish_template(self, request, template_uuid):
         try:
             session = await require_session(self.env, request)
         except ValueError as e:
             raise HttpError(401, str(e))
 
-        # Per-user rate limit (relayer has ~1 MON left on testnet)
-        try:
-            rl_id = self.env.PUBLISH_RATE_LIMITS.idFromName(session["userId"])
-            rl_stub = self.env.PUBLISH_RATE_LIMITS.get(rl_id)
-            rl_resp = await rl_stub.fetch(
-                "https://rate.internal/check",
-                method="POST",
-                headers={"Content-Type": "application/json"},
-                body="{}",
-            )
-            if getattr(rl_resp, "status", 500) == 429:
-                raise PublishError("publish rate limit exceeded", code="rate_limited")
-        except PublishError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            log("rate_limit_error", error=repr(e))
-            # Fail open? Prefer fail closed for relayer spend.
-            raise HttpError(503, "rate limiter unavailable")
+        await self._check_publish_rate_limits(session["userId"])
 
         body = await self._json_body(request)
-        # Creator ALWAYS from session — ignore any body.creator / wallet fields.
+        # Creator ALWAYS from session — ignore any body.creator / wallet / uri fields.
         creator = session["walletAddress"]
         price_wei = body.get("price_wei") or body.get("priceWei")
         parent_id = body.get("parent_id") or body.get("parentId") or 0
-        uri = body.get("uri") or body.get("metadata_uri") or body.get("metadataUri")
         if price_wei is None:
             raise HttpError(400, "price_wei is required")
-        if not uri:
-            # Default URI from template content hash if present
-            sb = Supabase(self.env)
-            tpl = await sb.get("templates", template_uuid)
-            if not tpl:
-                raise HttpError(404, "template not found")
-            uri = f"ipfs://edtech-monad/{template_uuid}"
-            if tpl.get("content_hash"):
-                uri = f"ipfs://edtech-monad/{tpl['content_hash']}"
+        price_wei_int = validate_publish_price(price_wei)
+
+        sb = Supabase(self.env)
+        tpl = await sb.get("templates", template_uuid)
+        material = None
+        if tpl and tpl.get("material_id"):
+            material = await sb.get("materials", tpl["material_id"])
+        user_row = await sb.get_by("users", "privy_user_id", session["userId"])
+        owner_user_id = user_row["id"] if user_row else None
+        assert_can_publish(template=tpl, material=material, owner_user_id=owner_user_id)
+
+        uri = validate_publish_uri(build_publish_uri(tpl))
 
         result = await send_publish_for(
             self.env,
             creator=creator,
-            price_wei=int(price_wei),
+            price_wei=price_wei_int,
             parent_id=int(parent_id),
-            uri=str(uri),
+            uri=uri,
         )
 
-        sb = Supabase(self.env)
-        row = await sb.update(
-            "templates",
-            template_uuid,
-            {
-                "is_published": True,
-                "price_mon": None,  # optionally derive from price_wei later
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        patch = {
+            "is_published": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if result.get("templateId"):
+            patch["onchain_token_id"] = str(result["templateId"])
+        # Approximate MON price for listings (wei / 1e18) when numeric column allows it
+        try:
+            patch["price_mon"] = price_wei_int / 10**18
+        except Exception:  # noqa: BLE001
+            pass
+        row = await sb.update("templates", template_uuid, patch)
         log("template_published", template_id=template_uuid, tx=result.get("txHash"), creator=creator)
         return self._json(request, {"ok": True, "template": row, "tx": result})
 
@@ -485,6 +517,11 @@ class Default(WorkerEntrypoint):
 
     # ---- Materials ------------------------------------------------------------
     async def upload_material(self, request):
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            raise HttpError(401, str(e))
+
         ctype = request.headers.get("Content-Type") or ""
         if "multipart/form-data" not in ctype:
             raise HttpError(415, "send multipart/form-data with a 'file' field (PDF)")
@@ -508,6 +545,17 @@ class Default(WorkerEntrypoint):
         if not title:
             title = re.sub(r"\.pdf$", "", name, flags=re.I).replace("_", " ").replace("-", " ").strip() or "Untitled"
 
+        sb = Supabase(self.env)
+        user_row = await sb.get_by("users", "privy_user_id", session["userId"])
+        if not user_row:
+            # Session exists but user row missing — upsert from session.
+            rows = await sb.upsert_user(
+                {"privy_user_id": session["userId"], "wallet_address": session["walletAddress"]}
+            )
+            user_row = rows[0] if isinstance(rows, list) and rows else rows
+        if not user_row or not user_row.get("id"):
+            raise HttpError(500, "failed to resolve user for owner_id")
+
         material_id = str(uuid.uuid4())
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:120]
         key = f"materials/{material_id}/{safe_name}"
@@ -516,10 +564,11 @@ class Default(WorkerEntrypoint):
             f,
             {"httpMetadata": {"contentType": "application/pdf"}, "customMetadata": {"material_id": material_id}},
         )
-        row = await Supabase(self.env).insert(
+        row = await sb.insert(
             "materials",
             {
                 "id": material_id,
+                "owner_id": user_row["id"],
                 "title": title[:300],
                 "r2_key": key,
                 "file_size_bytes": size,
@@ -527,7 +576,7 @@ class Default(WorkerEntrypoint):
                 "status": "uploaded",
             },
         )
-        log("material_uploaded", material_id=material_id, size=size)
+        log("material_uploaded", material_id=material_id, size=size, owner_id=user_row["id"])
         return self._json(request, {"material": row}, 201)
 
     async def _material_or_404(self, sb, material_id):

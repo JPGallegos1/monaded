@@ -11,6 +11,16 @@ import { fileURLToPath } from 'node:url'
 
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
+  server: {
+    // Local same-origin /api → api Worker (mirrors production web→API proxy).
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8787',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api/, '') || '/',
+      },
+    },
+  },
   plugins: [
     // Mermaid is rendered client-side only; resolve it to a stub in the SSR (Worker) build.
     {

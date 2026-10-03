@@ -18,6 +18,9 @@ CHAIN_BASE = "https://edtech-monad-chain.internal"
 # Per-user rate limit (relayer has limited MON on testnet)
 PUBLISH_LIMIT = 5
 PUBLISH_WINDOW_SECONDS = 3600
+# Global cap across all users (same DO class, fixed name "__global__")
+GLOBAL_PUBLISH_LIMIT = 30
+GLOBAL_PUBLISH_WINDOW_SECONDS = 3600
 
 SendTxFn = Callable[..., Awaitable[dict]]
 
@@ -91,8 +94,13 @@ async def send_publish_for(
         data = {"error": text[:500]}
     status = getattr(resp, "status", 500)
     if status >= 400:
-        raise PublishError((data or {}).get("error") or f"chain worker HTTP {status}", code="chain")
+        # Log detail server-side; never forward raw chain/viem errors to clients.
+        print(json.dumps({"event": "chain_publish_error", "status": status, "detail": (data or {}).get("error")}))
+        raise PublishError("publish transaction failed", code="chain")
     tx_hash = (data or {}).get("txHash")
     if not isinstance(tx_hash, str):
         raise PublishError("chain worker missing txHash", code="chain")
-    return {"txHash": tx_hash, "relayer": (data or {}).get("relayer")}
+    out = {"txHash": tx_hash, "relayer": (data or {}).get("relayer")}
+    if (data or {}).get("templateId") is not None:
+        out["templateId"] = str(data["templateId"])
+    return out

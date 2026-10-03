@@ -1,8 +1,9 @@
 // Single place where the frontend talks to the backend.
-// The web app NEVER talks to Supabase directly — only to the edtech-monad-api Worker.
-export const API_URL: string = (
-  import.meta.env.VITE_API_URL ?? 'http://localhost:8787'
-).replace(/\/+$/, '')
+// The web app NEVER talks to Supabase directly — only to the edtech-monad-api Worker
+// (browser: same-origin `/api/*` proxy on the web Worker; SSR: `API` service binding).
+
+/** Browser always uses same-origin `/api` so the session cookie is first-party. */
+export const API_URL: string = '/api'
 
 export type Health = {
   ok: boolean
@@ -23,20 +24,39 @@ export type Template = {
 }
 
 /**
- * In the browser: plain fetch to the public API URL.
- * During SSR (inside the edtech-monad-web Worker): go through the `API` service binding, because a
- * Worker cannot fetch another workers.dev Worker on the same account over the public URL (it 404s).
+ * Browser: same-origin `/api/*` (proxied by web Worker → API binding).
+ * SSR: `API` service binding, forwarding the incoming Cookie header.
  */
-async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers)
+  if (!headers.has('accept')) headers.set('accept', 'application/json')
+
   if (import.meta.env.SSR) {
-    const { env } = (await import('cloudflare:workers')) as { env: { API?: Fetcher } }
-    if (env.API) return env.API.fetch(`https://edtech-monad-api.internal${path}`, init)
+    // Forward the browser session cookie into the API binding call.
+    try {
+      const { getRequestHeader } = await import('@tanstack/react-start/server')
+      const cookie = getRequestHeader('cookie')
+      if (cookie && !headers.has('cookie')) headers.set('cookie', cookie)
+    } catch {
+      // Outside a request context (build-time) — no cookie to forward.
+    }
+    try {
+      const { env } = (await import('cloudflare:workers')) as { env: { API?: Fetcher } }
+      if (env.API) {
+        return env.API.fetch(`https://edtech-monad-api.internal${path}`, { ...init, headers })
+      }
+    } catch {
+      // fall through to direct URL (local vite SSR without binding)
+    }
+    const direct = (import.meta.env.VITE_API_URL ?? 'http://localhost:8787').replace(/\/+$/, '')
+    return fetch(`${direct}${path}`, { ...init, headers, credentials: 'include' })
   }
-  return fetch(`${API_URL}${path}`, init)
+
+  return fetch(`${API_URL}${path}`, { ...init, headers, credentials: 'include' })
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await apiFetch(path, { headers: { accept: 'application/json' } })
+  const res = await apiFetch(path)
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
@@ -54,6 +74,7 @@ export type Material = {
   id: string
   title: string
   r2_key: string
+  owner_id?: string | null
   file_size_bytes?: number | null
   page_count?: number | null
   status: 'uploaded' | 'processing' | 'ready' | 'failed'
@@ -95,7 +116,7 @@ export type GeneratedTemplate = Template & {
 }
 
 async function send<T>(path: string, init: RequestInit): Promise<T> {
-  const res = await apiFetch(path, { ...init, headers: { accept: 'application/json', ...init.headers } })
+  const res = await apiFetch(path, init)
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
   return body as T
@@ -123,3 +144,12 @@ export const generateTemplate = (id: string, opts: { start_page?: number; end_pa
 
 export const getTemplate = (id: string) =>
   getJson<{ template: GeneratedTemplate }>(`/templates/${id}`).then((r) => r.template)
+
+/** Session-authenticated profile upsert (userId always taken from the cookie session). */
+export function upsertUser(profile: { email?: string; display_name?: string; learning_style?: string } = {}) {
+  return send<{ user: unknown }>('/users', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(profile),
+  })
+}

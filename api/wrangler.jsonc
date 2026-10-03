@@ -28,11 +28,11 @@
 			"new_sqlite_classes": ["SessionDO", "PublishRateLimitDO"]
 		}
 	],
-	"vars": {
+		"vars": {
 		// Deployed frontend origin (no trailing slash). Overwritten at deploy time.
 		"FRONTEND_ORIGIN": "https://edtech-monad-web.jpgallegos20.workers.dev",
-		// Public Privy App ID (also set on web as VITE_PRIVY_APP_ID). Placeholder until Juan creates the app.
-		"PRIVY_APP_ID": "",
+		// Public Privy App ID (also set on web as VITE_PRIVY_APP_ID).
+		"PRIVY_APP_ID": "cmusv5fsd01zn0cl383kjq1vk",
 		"MARKETPLACE_ADDRESS": "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
 		"MONAD_RPC_URL": "https://testnet-rpc.monad.xyz",
 		"MONAD_CHAIN_ID": "10143"

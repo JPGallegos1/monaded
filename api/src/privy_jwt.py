@@ -248,7 +248,11 @@ async def verify_privy_jwt(
 
 
 def extract_wallet_from_identity_claims(claims: dict) -> str | None:
-    """Pull the first ethereum wallet address from a verified identity-token payload."""
+    """Pull an ethereum wallet from a verified identity-token payload.
+
+    Prefers the Privy embedded wallet (wallet_client / walletClientType == 'privy'),
+    matching the Privy users API fallback behavior.
+    """
     linked = claims.get("linked_accounts")
     raw = claims.get("raw") if isinstance(claims.get("raw"), dict) else {}
     if linked is None:
@@ -261,15 +265,27 @@ def extract_wallet_from_identity_claims(claims: dict) -> str | None:
             return None
     if not isinstance(linked, list):
         return None
+    embedded = None
+    external = None
     for acct in linked:
         if not isinstance(acct, dict):
             continue
         typ = (acct.get("type") or "").lower()
-        chain = (acct.get("chain_type") or acct.get("chainType") or "").lower()
         addr = acct.get("address")
-        if typ in ("wallet", "smart_wallet") and isinstance(addr, str) and addr.startswith("0x"):
-            if chain in ("", "ethereum", "evm"):
-                return addr
-        if typ == "wallet" and isinstance(addr, str) and addr.startswith("0x"):
-            return addr
-    return None
+        if not isinstance(addr, str) or not addr.startswith("0x"):
+            continue
+        chain = (acct.get("chain_type") or acct.get("chainType") or "ethereum").lower()
+        if chain not in ("", "ethereum", "evm"):
+            continue
+        client = (
+            acct.get("wallet_client")
+            or acct.get("walletClientType")
+            or acct.get("wallet_client_type")
+            or ""
+        ).lower()
+        if typ in ("wallet", "smart_wallet"):
+            if client == "privy":
+                embedded = addr
+            elif external is None:
+                external = addr
+    return embedded or external

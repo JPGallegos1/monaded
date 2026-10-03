@@ -1,17 +1,11 @@
 /**
  * Auth-aware API helpers: exchange Privy tokens for an HttpOnly session cookie,
  * then call the API with credentials included. Wallet address is never sent from the client.
+ *
+ * Browser traffic goes through same-origin `/api/*` (see web/src/server.ts proxy).
  */
-import { API_URL } from '../api'
+import { apiFetch } from '../api'
 import { getAccessToken } from '@privy-io/react-auth'
-
-async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  if (import.meta.env.SSR) {
-    const { env } = (await import('cloudflare:workers')) as { env: { API?: Fetcher } }
-    if (env.API) return env.API.fetch(`https://edtech-monad-api.internal${path}`, init)
-  }
-  return fetch(`${API_URL}${path}`, { ...init, credentials: 'include' })
-}
 
 export type SessionInfo = {
   ok: boolean
@@ -45,23 +39,17 @@ export async function createServerSession(opts?: {
 }
 
 export async function getServerSession(): Promise<SessionInfo> {
-  const res = await apiFetch('/auth/session', {
-    method: 'GET',
-    headers: { accept: 'application/json' },
-  })
+  const res = await apiFetch('/auth/session', { method: 'GET' })
   return (await res.json().catch(() => ({ ok: false }))) as SessionInfo
 }
 
 export async function logoutServerSession(): Promise<void> {
-  await apiFetch('/auth/logout', { method: 'POST', headers: { accept: 'application/json' } })
+  await apiFetch('/auth/logout', { method: 'POST' })
 }
 
-/** Auth-aware JSON fetch (sends session cookie). */
+/** Auth-aware JSON fetch (sends session cookie via same-origin `/api`). */
 export async function authedJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await apiFetch(path, {
-    ...init,
-    headers: { accept: 'application/json', ...(init.headers || {}) },
-  })
+  const res = await apiFetch(path, init)
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
   return body as T
@@ -69,7 +57,7 @@ export async function authedJson<T>(path: string, init: RequestInit = {}): Promi
 
 export async function verifyPurchase(input: {
   txHash: string
-  onchainTemplateId: number | string
+  onchainTemplateId?: number | string
   templateId?: string
 }) {
   return authedJson<{ ok: boolean; purchase: unknown }>('/purchases/verify', {
@@ -85,7 +73,7 @@ export async function verifyPurchase(input: {
 
 export async function publishTemplate(
   templateId: string,
-  input: { priceWei: string | number; parentId?: number; uri?: string },
+  input: { priceWei: string | number; parentId?: number },
 ) {
   return authedJson<{ ok: boolean; tx: { txHash: string } }>(`/templates/${templateId}/publish`, {
     method: 'POST',
@@ -93,7 +81,7 @@ export async function publishTemplate(
     body: JSON.stringify({
       price_wei: input.priceWei,
       parent_id: input.parentId ?? 0,
-      uri: input.uri,
+      // uri is built server-side — never send it from the client
     }),
   })
 }
