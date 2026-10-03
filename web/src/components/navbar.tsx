@@ -1,4 +1,4 @@
-import { Link } from '@tanstack/react-router'
+import { Link, useRouterState } from '@tanstack/react-router'
 import { Upload } from 'lucide-react'
 import ThemeToggle from '#/components/ThemeToggle'
 import { Button } from '#/components/ui/button'
@@ -105,13 +105,23 @@ export function Navbar({
   )
 }
 
+function activeFromPath(pathname: string): 'Explore' | 'Create' | 'Library' | 'Dashboard' | undefined {
+  if (pathname.startsWith('/upload') || pathname.startsWith('/fork')) return 'Create'
+  if (pathname.startsWith('/library')) return 'Library'
+  if (pathname.startsWith('/dashboard')) return 'Dashboard'
+  if (pathname.startsWith('/templates') || pathname === '/') return 'Explore'
+  return undefined
+}
+
 /** Default export keeps __root.tsx simple; auth props can be threaded later via context. */
 export default function Header(props: {
   active?: 'Explore' | 'Create' | 'Library' | 'Dashboard'
 }) {
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const active = props.active ?? activeFromPath(pathname)
   return (
     <Navbar
-      active={props.active}
+      active={active}
       // TODO(privy): pass real user + onSignIn/onSignOut from Privy provider
       auth={{
         user: null,
