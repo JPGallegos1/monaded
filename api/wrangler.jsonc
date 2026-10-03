@@ -1,0 +1,18 @@
+{
+	"$schema": "https://unpkg.com/wrangler/config-schema.json",
+	"name": "edtech-monad-api",
+	"main": "src/entry.py",
+	"compatibility_date": "2026-10-01",
+	"compatibility_flags": ["python_workers"],
+	"observability": {
+		"enabled": true,
+		"traces": { "enabled": true }
+	},
+	"vars": {
+		// Deployed frontend origin (no trailing slash). Overwritten at deploy time.
+		"FRONTEND_ORIGIN": "https://edtech-monad-web.example.workers.dev"
+	}
+	// Secrets (set with `uv run pywrangler secret put NAME`, never committed):
+	//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+	// Local dev: put them in api/.dev.vars (gitignored).
+}

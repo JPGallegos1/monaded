@@ -1,0 +1,13 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	// TanStack Start on Cloudflare = Workers + static assets (current official guidance; Pages is not used).
+	"name": "edtech-monad-web",
+	"compatibility_date": "2026-10-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "@tanstack/react-start/server-entry",
+	"observability": {
+		"enabled": true,
+		"traces": { "enabled": true }
+	},
+	"upload_source_maps": true
+}

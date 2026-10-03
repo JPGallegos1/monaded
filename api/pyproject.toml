@@ -1,0 +1,12 @@
+[project]
+name = "edtech-monad-api"
+version = "0.1.0"
+description = "edtech-monad API — pure Python Cloudflare Worker; the only component that talks to Supabase (PostgREST)."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "workers-runtime-sdk",
+]

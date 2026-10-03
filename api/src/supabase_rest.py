@@ -1,0 +1,89 @@
+"""Minimal Supabase PostgREST client built on the Workers fetch API.
+
+Only the API Worker talks to Supabase. The service role key is read from Worker
+secrets and is never returned to clients or logged.
+"""
+
+import json
+from urllib.parse import quote
+
+from workers import fetch
+
+
+class SupabaseNotConfigured(Exception):
+    pass
+
+
+class SupabaseError(Exception):
+    def __init__(self, status, detail):
+        super().__init__(f"Supabase error {status}")
+        self.status = status
+        self.detail = detail
+
+
+def _env(env, name):
+    try:
+        value = getattr(env, name)
+    except AttributeError:
+        return None
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+class Supabase:
+    def __init__(self, env):
+        self.url = (_env(env, "SUPABASE_URL") or "").rstrip("/") or None
+        self.key = _env(env, "SUPABASE_SERVICE_ROLE_KEY")
+
+    @property
+    def configured(self):
+        return bool(self.url and self.key)
+
+    def _headers(self, extra=None):
+        headers = {
+            "apikey": self.key,
+            "Authorization": f"Bearer {self.key}",
+            "Accept": "application/json",
+        }
+        if extra:
+            headers.update(extra)
+        return headers
+
+    async def ping(self):
+        """Return (reachable, http_status). Hits the PostgREST root."""
+        if not self.configured:
+            raise SupabaseNotConfigured()
+        resp = await fetch(f"{self.url}/rest/v1/", method="GET", headers=self._headers())
+        return 200 <= resp.status < 300, resp.status
+
+    async def request(self, method, path, body=None, prefer=None):
+        if not self.configured:
+            raise SupabaseNotConfigured()
+        extra = {}
+        if body is not None:
+            extra["Content-Type"] = "application/json"
+        if prefer:
+            extra["Prefer"] = prefer
+        kwargs = {"method": method, "headers": self._headers(extra)}
+        if body is not None:
+            kwargs["body"] = json.dumps(body)
+        resp = await fetch(f"{self.url}/rest/v1/{path}", **kwargs)
+        text = await resp.text()
+        data = json.loads(text) if text else None
+        if resp.status >= 400:
+            raise SupabaseError(resp.status, data)
+        return data
+
+    async def list_published_templates(self, limit=50):
+        q = f"templates?select=*&is_published=eq.true&limit={int(limit)}"
+        return await self.request("GET", q)
+
+    async def upsert_user(self, row):
+        return await self.request(
+            "POST",
+            "users?on_conflict=" + quote("privy_user_id"),
+            body=[row],
+            prefer="resolution=merge-duplicates,return=representation",
+        )
