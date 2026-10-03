@@ -5,23 +5,36 @@ Hackathon MVP skeleton for an EdTech app (learning materials + remixable, sellab
 ## Architecture
 
 ```
-Browser ──► edtech-monad-web  (TanStack Start + TanStack Router, Cloudflare Worker w/ static assets)
-               │  fetch(VITE_API_URL)
+Browser ──► edtech-monad-web  (TanStack Start, Cloudflare Worker with static assets — not Pages)
+               │  browser: fetch(VITE_API_URL)   ·   SSR loaders: `API` service binding
                ▼
-           edtech-monad-api  (Cloudflare Worker, pure Python / Python Workers)
-               │  fetch PostgREST  (service role key from Worker secrets)
-               ▼
-           Supabase (Postgres: users, materials, templates)
+           edtech-monad-api  (pure Python Worker) ── the ONLY component that talks to Supabase
+               │  PostgREST (service role)        │  R2 `PDFS`          │  `GEN` service binding
+               ▼                                  ▼                     ▼
+           Supabase (users, materials,      R2 edtech-monad-pdfs   edtech-monad-gen (TypeScript Worker, internal:
+           templates)                       (PDFs, page text,        no public URL; TanStack AI + Workers AI;
+                                             template JSON)          reads/writes R2, never touches Supabase)
 ```
 
-* **`api/`** — Worker `edtech-monad-api`, pure Python (`src/entry.py`, `src/supabase_rest.py`). The **only** component that talks to Supabase, via the PostgREST REST API (`/rest/v1/...`) with `SUPABASE_SERVICE_ROLE_KEY`. No Python packages, no Node code in the Worker.
-  * `GET /health` → `{"ok": true, "supabase": {"configured": bool, "reachable": bool, "status": int}}`
+* **`api/`** — Worker `edtech-monad-api`, pure Python (`src/entry.py`, `src/supabase_rest.py`). The **only** component that talks to Supabase, via PostgREST with `SUPABASE_SERVICE_ROLE_KEY`.
+  * `GET /health` → `{"ok", "supabase": {"configured", "reachable", "status"}, "gen": {"bound", "status", "model"}}`
   * `GET /templates` → `{"templates": [...]}` (rows with `is_published = true`)
-  * `POST /users` → upsert by `privy_user_id` (fields: `privy_user_id`, `wallet_address`, `email`, `display_name`, `learning_style`). Requires a UNIQUE constraint on `users.privy_user_id`.
-  * CORS: only `FRONTEND_ORIGIN` (comma-separated allowed) + `http://localhost:3000|5173`.
-  * Secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. Var: `FRONTEND_ORIGIN`.
-* **`web/`** — Worker `edtech-monad-web`, TanStack Start. Never talks to Supabase; calls the API at `VITE_API_URL` (inlined at build time). Pages: `/` (API + Supabase health) and `/templates`.
-  * Note: the user asked for Pages, but current official Cloudflare guidance for TanStack Start is **Workers with static assets** (`@cloudflare/vite-plugin`, `wrangler deploy`), so that is what's used.
+  * `GET /templates/{id}` → `{"template": {...}}` (any status, includes generated `content` + `generation` metadata)
+  * `POST /users` → upsert by `privy_user_id`
+  * `POST /materials` → multipart (`file` = PDF, optional `title`); stored in R2 at `materials/<id>/<filename>`, `materials` row created. Max 50 MB; `%PDF-` magic checked. The runtime's native `FormData` is used and the JS `File` is handed straight to R2 (bytes never copied into Python).
+  * `GET /materials/{id}` → material + its templates
+  * `POST /materials/{id}/extract` → gen Worker converts the PDF to text (Workers AI `toMarkdown`, which emits `### Page N` markers), stores page text in R2, sets `page_count`, returns `suggested_start_page` (first "Chapter…" page that isn't the table of contents) and page previews.
+  * `POST /materials/{id}/templates` → JSON `{start_page?, end_page?, learning_style?}`; inserts a `templates` row (`status=generating`), calls gen `/generate`, then saves `content` (jsonb), `description`, `generation`, `content_r2_key`, `content_hash`, `status=ready` (or `failed` + `error`).
+  * CORS: only `FRONTEND_ORIGIN` + localhost dev origins. Secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. Bindings: `PDFS` (R2), `GEN` (service).
+* **`gen/`** — Worker `edtech-monad-gen` (TypeScript). `workers_dev: false`, so it is reachable only through the API's `GEN` binding (protects the Workers AI quota).
+  * `/extract`: R2 PDF → `env.AI.toMarkdown()` → `pages.txt` (UTF-8) + `pages-index.json` (byte offsets) in R2.
+  * `/generate`: R2 range-read of the selected pages only → `chat({ adapter, outputSchema })` from **`@tanstack/ai`** with the official **`@tanstack/ai-cloudflare`** adapter on the `AI` binding → Zod-validated study template (`src/schema.ts`: title, summary, learning objectives, sections + key concepts, definitions, worked examples, practice questions with answers/explanations, Mermaid diagrams). Post-processing removes duplicate questions, quotes Mermaid labels and repairs LaTeX backslashes that JSON turned into control characters.
+  * Model: `AI_MODEL` var (default `@cf/meta/llama-3.1-8b-instruct-fast`; plain `@cf/meta/llama-3.1-8b-instruct` is deprecated on Workers AI and `-fp8` doesn't support JSON Schema). Override with `npx wrangler deploy --var AI_MODEL:<model id>`.
+  * Limits per generation: `MAX_PAGES=12`, `MAX_INPUT_CHARS=24000` (~8.5k tokens of math text), `MAX_OUTPUT_TOKENS=6000`. Longer selections are truncated and flagged (`generation.truncated`). For big books (e.g. Hefferon's 525-page *Linear Algebra*) pick a section, e.g. pages 11–22 = Chapter One §I.1 "Gauss's Method".
+  * Workers Free plan (10 ms CPU/request): the stock adapter streams structured output token by token (~1.9 s CPU → `exceededCpu`), so `gen` uses a tiny adapter subclass that hides `structuredOutputStream`, making TanStack AI use the adapter's non-streaming `structuredOutput` (~45 ms CPU).
+  * Flow is synchronous (extract ≈ 10–16 s, generate ≈ 18–28 s for Hefferon). Queues were not used today; they would be the next step for longer jobs.
+* **`web/`** — Worker `edtech-monad-web`, TanStack Start. Never talks to Supabase. Pages: `/` (health), `/templates`, `/upload` (PDF input + loading states; deliberately unstyled, the UI will be rebuilt), `/templates/<id>` (SSR-rendered template; Mermaid rendered client-side only and stubbed out of the Worker bundle).
+* **`supabase/migrations/`** — SQL applied to the project (Day 2: `materials.original_filename/text_r2_key/error`, `templates.content/status/error/generation`).
 
 ## Prerequisites
 
@@ -46,12 +59,13 @@ npm run dev
 
 ```bash
 export CLOUDFLARE_API_TOKEN=...      # never commit
-./scripts/deploy.sh                  # api → secrets (from ../supabase-credentials.env if complete) → web → api again with FRONTEND_ORIGIN
+./scripts/deploy.sh                  # R2 bucket + gen → api → secrets (from ../supabase-credentials.env) → web → api again with FRONTEND_ORIGIN
 ```
 
 Manual equivalents:
 
 ```bash
+cd gen && npm ci && npx wrangler deploy      # first: the API binds to it
 cd api && uv run pywrangler deploy --var FRONTEND_ORIGIN:https://edtech-monad-web.<subdomain>.workers.dev
 cd api && uv run pywrangler secret put SUPABASE_URL                # prompts / reads stdin
 cd api && uv run pywrangler secret put SUPABASE_SERVICE_ROLE_KEY

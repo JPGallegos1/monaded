@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy edtech-monad-api (Python Worker) then edtech-monad-web (TanStack Start Worker).
+# Deploy edtech-monad-gen (TS, AI generation; internal) -> edtech-monad-api (Python) -> edtech-monad-web (TanStack Start).
 # Requires: CLOUDFLARE_API_TOKEN in env, Node >= 22, uv.
 # Optional: CREDS=/path/to/supabase-credentials.env (default ../supabase-credentials.env)
 set -euo pipefail
@@ -13,6 +13,10 @@ if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
   export CLOUDFLARE_ACCOUNT_ID
 fi
 echo "Account: ${CLOUDFLARE_ACCOUNT_ID:-<auto>}"
+
+# 0) R2 bucket (idempotent) + gen Worker (must exist before the API's GEN service binding)
+(cd "$ROOT/gen" && { npx wrangler r2 bucket list 2>/dev/null | grep -q 'edtech-monad-pdfs' || npx wrangler r2 bucket create edtech-monad-pdfs; } \
+  && npm ci --silent && npx wrangler deploy)
 
 # 1) Deploy API (first pass: FRONTEND_ORIGIN unknown yet if web not deployed)
 cd "$ROOT/api"
