@@ -11,6 +11,7 @@
  */
 import { chat } from '@tanstack/ai'
 import { CloudflareTextAdapter } from '@tanstack/ai-cloudflare'
+import { OpenAITextAdapter, type OpenAIChatModel } from '@tanstack/ai-openai'
 import { StudyTemplateSchema, type StudyTemplate } from './schema'
 
 export interface Env {
@@ -24,6 +25,13 @@ export interface Env {
   AI_REASONING_EFFORT?: string
   /** 'true' = run non-streaming AI calls as a stream on the wire and aggregate (see streamAggregatingBinding). */
   AI_STREAM_AGGREGATE?: string
+  /** 'cloudflare' (default, Workers AI) | 'openai' */
+  LLM_PROVIDER?: string
+  OPENAI_API_KEY?: string // secret
+  OPENAI_MODEL?: string
+  /** OpenAI reasoning effort, e.g. 'low' | 'medium' | 'high' | 'xhigh' | 'max' (passed through as-is). */
+  OPENAI_REASONING_EFFORT?: string
+  OPENAI_MAX_OUTPUT_TOKENS?: string
 }
 
 const json = (data: unknown, status = 200) =>
@@ -140,6 +148,25 @@ class NonStreamingCloudflareText<M extends string> extends CloudflareTextAdapter
   override structuredOutputStream = undefined as any
 }
 
+/**
+ * Same idea for OpenAI. The Responses adapter declares native "combined tools + schema" support, which
+ * makes chat({ outputSchema }) run a *streaming* request; turning that off (we use no tools) plus hiding
+ * structuredOutputStream gives a single `stream: false` Responses call with strict json_schema.
+ */
+class NonStreamingOpenAIText<M extends OpenAIChatModel> extends OpenAITextAdapter<M> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  override structuredOutputStream = undefined as any
+  override supportsCombinedToolsAndSchema() {
+    return false
+  }
+}
+
+/** USD per 1M tokens, for cost_usd in generation metadata (completion tokens include reasoning). */
+const PRICES_USD_PER_M: Record<string, { input: number; output: number; cached?: number }> = {
+  'gpt-6-luna': { input: 0.1, output: 0.5, cached: 0.01 },
+  '@cf/qwen/qwen3.8-27b': { input: 0.45, output: 3.2, cached: 0.05 },
+}
+
 const SYSTEM_PROMPT = `You are an expert teacher who turns textbook excerpts into clear, accurate study guides.
 Rules:
 - Write all text values in the same language as the excerpt (keep the JSON keys in English).
@@ -198,17 +225,44 @@ async function generate(env: Env, body: Record<string, unknown>) {
   let lastPageUsed = first.last
 
   const style = typeof body.learning_style === 'string' && body.learning_style ? body.learning_style : 'balanced'
-  const model = env.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast'
-  // Cast: the adapter pins @cloudflare/workers-types v4, this project uses v5 (identical runtime binding).
-  const binding = env.AI_STREAM_AGGREGATE === 'true' ? streamAggregatingBinding(env.AI) : env.AI
-  const adapter = new NonStreamingCloudflareText({ binding: binding as any }, model)
+  const provider = (env.LLM_PROVIDER || 'cloudflare').toLowerCase()
+  if (provider !== 'cloudflare' && provider !== 'openai') throw new HttpError(500, `unknown LLM_PROVIDER: ${provider}`)
+  if (provider === 'openai' && !env.OPENAI_API_KEY) throw new HttpError(500, 'LLM_PROVIDER=openai but the OPENAI_API_KEY secret is not set')
+  const model =
+    provider === 'openai'
+      ? env.OPENAI_MODEL || 'gpt-6-luna'
+      : env.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast'
+  const effort = (provider === 'openai' ? env.OPENAI_REASONING_EFFORT : env.AI_REASONING_EFFORT) || undefined
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let adapter: any
+  if (provider === 'openai') {
+    adapter = new NonStreamingOpenAIText({ apiKey: env.OPENAI_API_KEY as string }, model as any)
+  } else {
+    // Cast: the adapter pins @cloudflare/workers-types v4, this project uses v5 (identical runtime binding).
+    const binding = env.AI_STREAM_AGGREGATE === 'true' ? streamAggregatingBinding(env.AI) : env.AI
+    adapter = new NonStreamingCloudflareText({ binding: binding as any }, model)
+  }
+  const modelOptionsFor = (attempt: number): Record<string, unknown> =>
+    provider === 'openai'
+      ? {
+          // Responses API: reasoning models reject temperature; max_output_tokens covers reasoning + answer.
+          max_output_tokens: Number(env.OPENAI_MAX_OUTPUT_TOKENS) || 64000,
+          ...(effort ? { reasoning: { effort } } : {}),
+        }
+      : {
+          max_tokens: Number(env.MAX_OUTPUT_TOKENS) || 6000,
+          temperature: attempt === 1 ? 0.3 : 0.2,
+          // Retry (after e.g. finish_reason=length from a repetition loop) adds a mild repetition penalty.
+          ...(attempt > 1 ? { repetition_penalty: 1.1 } : {}),
+          ...(effort ? { reasoning_effort: effort } : {}),
+        }
 
   const t0 = Date.now()
   let template: StudyTemplate | null = null
   let lastErr: unknown
   let attempts = 0
-  const usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
-  const effort = env.AI_REASONING_EFFORT as 'low' | 'medium' | 'high' | undefined
+  const usage = { prompt_tokens: 0, cached_prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 }
+  const attemptMs: number[] = []
   for (attempts = 1; attempts <= 2 && !template; attempts++) {
     if (attempts > 1) {
       // Retry with fewer pages (~60% of the first excerpt) and record what was actually sent.
@@ -216,6 +270,7 @@ async function generate(env: Env, body: Record<string, unknown>) {
       excerpt = retry.text
       lastPageUsed = retry.last
     }
+    const ta = Date.now()
     try {
       template = await chat({
         adapter,
@@ -231,41 +286,52 @@ async function generate(env: Env, body: Record<string, unknown>) {
         middleware: [
           {
             name: 'usage-capture',
-            onUsage: (_ctx, u) => {
+            onUsage: (_ctx: unknown, u: any) => {
               usage.prompt_tokens += u.promptTokens ?? 0
+              usage.cached_prompt_tokens += u.promptTokensDetails?.cachedTokens ?? 0
               usage.completion_tokens += u.completionTokens ?? 0
+              usage.reasoning_tokens += u.completionTokensDetails?.reasoningTokens ?? 0
             },
           },
         ],
-        // Retry (after e.g. finish_reason=length from a repetition loop) uses a shorter excerpt and a
-        // mild repetition penalty.
-        modelOptions: {
-          max_tokens: Number(env.MAX_OUTPUT_TOKENS) || 6000,
-          temperature: attempts === 1 ? 0.3 : 0.2,
-          ...(attempts > 1 ? { repetition_penalty: 1.1 } : {}),
-          ...(effort ? { reasoning_effort: effort } : {}),
-        },
+        modelOptions: modelOptionsFor(attempts),
       })
     } catch (e) {
       lastErr = e
-      log('generate_attempt_failed', { materialId, attempt: attempts, error: e instanceof Error ? e.message : String(e) })
+      log('generate_attempt_failed', { materialId, provider, model, attempt: attempts, ms: Date.now() - ta, error: e instanceof Error ? e.message : String(e) })
     }
+    attemptMs.push(Date.now() - ta)
   }
   attempts -= 1
   const ms = Date.now() - t0
   if (!template) throw new HttpError(502, `AI generation failed after ${attempts} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`)
 
   template = normalize(template)
+  const price = PRICES_USD_PER_M[model]
+  const cost_usd = price
+    ? +(
+        ((usage.prompt_tokens - usage.cached_prompt_tokens) * price.input +
+          usage.cached_prompt_tokens * (price.cached ?? price.input) +
+          usage.completion_tokens * price.output) /
+        1e6
+      ).toFixed(6)
+    : null
   const generation = {
+    provider,
     model,
-    sdk: '@tanstack/ai + @tanstack/ai-cloudflare (Workers AI binding)',
+    sdk:
+      provider === 'openai'
+        ? '@tanstack/ai + @tanstack/ai-openai (Responses API, non-streaming structured output)'
+        : '@tanstack/ai + @tanstack/ai-cloudflare (Workers AI binding)',
     source_pages: { start, end: lastPageUsed, requested_end: requestedEnd, total: pageCount },
     // true when fewer pages than requested were sent (char budget, page cap, or a shorter retry)
     input_chars: excerpt.length,
     truncated: lastPageUsed < requestedEnd,
     limits: { max_pages: maxPages, max_input_chars: maxChars },
     attempts,
-    usage,
+    attempt_ms: attemptMs,
+    usage, // completion_tokens include reasoning_tokens
+    cost_usd,
     reasoning_effort: effort ?? null,
     generate_ms: ms,
     learning_style: style,
