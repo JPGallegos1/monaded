@@ -87,3 +87,22 @@ class Supabase:
             body=[row],
             prefer="resolution=merge-duplicates,return=representation",
         )
+
+    # ---- generic row helpers (service role; RLS bypassed) -------------------
+    async def insert(self, table, row):
+        rows = await self.request("POST", table, body=[row], prefer="return=representation")
+        return rows[0] if rows else None
+
+    async def update(self, table, row_id, patch):
+        rows = await self.request(
+            "PATCH", f"{table}?id=eq.{quote(str(row_id))}", body=patch, prefer="return=representation"
+        )
+        return rows[0] if rows else None
+
+    async def get(self, table, row_id, select="*"):
+        rows = await self.request("GET", f"{table}?select={select}&id=eq.{quote(str(row_id))}&limit=1")
+        return rows[0] if rows else None
+
+    async def list_where(self, table, column, value, select="*", order="created_at.desc", limit=50):
+        q = f"{table}?select={select}&{column}=eq.{quote(str(value))}&order={order}&limit={int(limit)}"
+        return await self.request("GET", q)

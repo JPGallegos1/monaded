@@ -8,6 +8,10 @@
 		"enabled": true,
 		"traces": { "enabled": true }
 	},
+	// PDFs, extracted page text and template JSON (shared with edtech-monad-gen).
+	"r2_buckets": [{ "binding": "PDFS", "bucket_name": "edtech-monad-pdfs" }],
+	// Internal TypeScript Worker doing text extraction + AI generation (TanStack AI on Workers AI).
+	"services": [{ "binding": "GEN", "service": "edtech-monad-gen" }],
 	"vars": {
 		// Deployed frontend origin (no trailing slash). Overwritten at deploy time.
 		"FRONTEND_ORIGIN": "https://edtech-monad-web.jpgallegos20.workers.dev"
