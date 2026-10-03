@@ -1,0 +1,14 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "edtech-monad-chain",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "vars": {
+    "MARKETPLACE_ADDRESS": "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
+    "MONAD_RPC_URL": "https://testnet-rpc.monad.xyz",
+    "MONAD_CHAIN_ID": "10143"
+  }
+  // Secrets (never commit): RELAYER_PRIVATE_KEY
+  // Local: chain/.dev.vars
+}

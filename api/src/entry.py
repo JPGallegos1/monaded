@@ -1,10 +1,15 @@
 """edtech-monad-api — pure Python Cloudflare Worker.
 
 Routes:
-  GET  /health                     -> {"ok": true, "supabase": {...}, "gen": {...}}
+  GET  /health                     -> {"ok": true, "supabase": {...}, "gen": {...}, "privy": {...}}
   GET  /templates                  -> {"templates": [...published templates...]}
   GET  /templates/{id}             -> {"template": {...}} (any status; includes generated content)
-  POST /users                      -> upsert a user by privy_user_id
+  POST /users                      -> upsert a user by privy_user_id (legacy; prefer session)
+  POST /auth/session               -> exchange Privy access (+ identity) token for HttpOnly session cookie
+  GET  /auth/session               -> current session {userId, walletAddress} (from cookie)
+  POST /auth/logout                -> clear session cookie + Durable Object
+  POST /purchases/verify           -> verify TemplateMarketplace buy tx; record once (unique tx_hash)
+  POST /templates/{id}/publish     -> relayer publishFor; creator = session wallet only
   POST /materials                  -> multipart (file=<PDF>, title?) -> R2 + materials row
   GET  /materials/{id}             -> {"material": {...}, "templates": [...]}
   POST /materials/{id}/extract     -> PDF text extraction via the gen Worker (Workers AI toMarkdown)
@@ -13,6 +18,9 @@ Routes:
 
 The gen Worker (TypeScript, TanStack AI) is reached through the `GEN` service binding and never
 touches Supabase: this Worker remains the only component that reads/writes the database.
+
+Privy session state lives in the SessionDO Durable Object (userId + wallet only — never raw tokens).
+On-chain publishFor is signed by edtech-monad-chain (CHAIN binding) with RELAYER_PRIVATE_KEY.
 """
 
 import json
@@ -24,6 +32,21 @@ from urllib.parse import urlparse
 
 from workers import Response, WorkerEntrypoint
 
+from privy_jwt import JwtError, JwksCache, verify_privy_jwt
+from privy_users import PrivyUserError, resolve_wallet_address
+from publish import PublishError, send_publish_for
+from purchase import PurchaseError, verify_purchase_tx
+from rate_limit_do import PublishRateLimitDO  # noqa: F401 — exported for wrangler DO binding
+from session import (
+    SESSION_COOKIE,
+    create_session,
+    delete_session,
+    get_session_id_from_request,
+    read_session,
+    require_session,
+    session_cookie_header,
+)
+from session_do import SessionDO  # noqa: F401 — exported for wrangler DO binding
 from supabase_rest import Supabase, SupabaseError, SupabaseNotConfigured
 
 DEV_ORIGINS = {
@@ -37,6 +60,9 @@ USER_FIELDS = ("privy_user_id", "wallet_address", "email", "display_name", "lear
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 UUID_RE = r"[0-9a-fA-F-]{36}"
 GEN_BASE = "https://edtech-monad-gen.internal"  # host is ignored by service bindings
+
+# Module-level JWKS cache (per isolate). Short TTL; unknown kid forces refresh.
+_JWKS_CACHE = JwksCache()
 
 
 class HttpError(Exception):
@@ -55,6 +81,16 @@ def log(event, **fields):
     print(json.dumps({"event": event, **fields}))
 
 
+def _env_str(env, name, default=""):
+    try:
+        v = getattr(env, name)
+    except AttributeError:
+        return default
+    if v is None:
+        return default
+    return str(v).strip() or default
+
+
 class Default(WorkerEntrypoint):
     # ---- CORS -------------------------------------------------------------
     def _allowed_origins(self):
@@ -69,7 +105,7 @@ class Default(WorkerEntrypoint):
                 allowed.add(o)
         return allowed
 
-    def _cors_headers(self, request):
+    def _cors_headers(self, request, *, set_cookie: str | None = None):
         origin = request.headers.get("Origin")
         headers = {"Vary": "Origin"}
         if origin and origin in self._allowed_origins():
@@ -77,15 +113,18 @@ class Default(WorkerEntrypoint):
                 {
                     "Access-Control-Allow-Origin": origin,
                     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type,Authorization",
+                    "Access-Control-Allow-Headers": "Content-Type,Authorization,Privy-Id-Token",
+                    "Access-Control-Allow-Credentials": "true",
                     "Access-Control-Max-Age": "86400",
                 }
             )
+        if set_cookie:
+            headers["Set-Cookie"] = set_cookie
         return headers
 
-    def _json(self, request, data, status=200):
+    def _json(self, request, data, status=200, *, set_cookie: str | None = None):
         headers = {"Content-Type": "application/json"}
-        headers.update(self._cors_headers(request))
+        headers.update(self._cors_headers(request, set_cookie=set_cookie))
         return Response(json.dumps(data), status=status, headers=headers)
 
     # ---- Entry ------------------------------------------------------------
@@ -106,11 +145,22 @@ class Default(WorkerEntrypoint):
                 return await self.templates(request)
             if path == "/users" and method == "POST":
                 return await self.upsert_user(request)
+            if path == "/auth/session" and method == "POST":
+                return await self.create_auth_session(request)
+            if path == "/auth/session" and method == "GET":
+                return await self.get_auth_session(request)
+            if path == "/auth/logout" and method == "POST":
+                return await self.logout(request)
+            if path == "/purchases/verify" and method == "POST":
+                return await self.verify_purchase(request)
             if path == "/materials" and method == "POST":
                 return await self.upload_material(request)
             m = re.fullmatch(rf"/templates/({UUID_RE})", path)
             if m and method == "GET":
                 return await self.get_template(request, m.group(1))
+            m = re.fullmatch(rf"/templates/({UUID_RE})/publish", path)
+            if m and method == "POST":
+                return await self.publish_template(request, m.group(1))
             m = re.fullmatch(rf"/materials/({UUID_RE})(/extract|/templates)?", path)
             if m:
                 mid, sub = m.group(1), m.group(2)
@@ -121,15 +171,31 @@ class Default(WorkerEntrypoint):
                 if sub == "/templates" and method == "POST":
                     return await self.generate_template(request, mid)
                 return self._json(request, {"error": "method not allowed"}, 405)
-            if path in ("/health", "/templates", "/users", "/materials"):
+            if path in ("/health", "/templates", "/users", "/materials", "/auth/session", "/auth/logout", "/purchases/verify"):
                 return self._json(request, {"error": "method not allowed"}, 405)
             return self._json(request, {"error": "not found"}, 404)
         except HttpError as e:
             return self._json(request, {"error": e.message, **e.extra}, e.status)
+        except JwtError as e:
+            return self._json(request, {"error": e.message, "code": e.code}, 401)
+        except PrivyUserError as e:
+            return self._json(request, {"error": e.message, "code": e.code}, 400)
+        except PurchaseError as e:
+            status = 409 if e.code == "replay" else 400
+            return self._json(request, {"error": e.message, "code": e.code}, status)
+        except PublishError as e:
+            status = 429 if e.code == "rate_limited" else 400
+            if e.code in ("config", "chain"):
+                status = 503 if e.code == "config" else 502
+            return self._json(request, {"error": e.message, "code": e.code}, status)
         except SupabaseNotConfigured:
             return self._json(request, {"error": "supabase not configured"}, 503)
         except SupabaseError as e:
             log("supabase_error", status=e.status, path=path)
+            # Unique violation on purchases.tx_hash → replay
+            detail = e.detail
+            if e.status == 409 or (isinstance(detail, dict) and "tx_hash" in str(detail).lower()):
+                return self._json(request, {"error": "tx hash already used", "code": "replay"}, 409)
             return self._json(request, {"error": "supabase error", "status": e.status, "detail": e.detail}, 502)
         except Exception as e:  # noqa: BLE001
             log("unhandled_error", path=path, error=repr(e))
@@ -151,7 +217,25 @@ class Default(WorkerEntrypoint):
             gen = {"bound": True, "status": status, "model": (body or {}).get("model")}
         except Exception as e:  # noqa: BLE001
             gen["error"] = type(e).__name__
-        return self._json(request, {"ok": True, "service": "edtech-monad-api", "supabase": supa, "gen": gen})
+        privy_app = _env_str(self.env, "PRIVY_APP_ID")
+        privy_secret = bool(_env_str(self.env, "PRIVY_APP_SECRET"))
+        chain = {"bound": False}
+        try:
+            resp = await self.env.CHAIN.fetch("https://edtech-monad-chain.internal/health", method="GET")
+            chain = {"bound": True, "status": resp.status}
+        except Exception as e:  # noqa: BLE001
+            chain["error"] = type(e).__name__
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "service": "edtech-monad-api",
+                "supabase": supa,
+                "gen": gen,
+                "chain": chain,
+                "privy": {"app_id_configured": bool(privy_app), "app_secret_configured": privy_secret},
+            },
+        )
 
     async def templates(self, request):
         rows = await Supabase(self.env).list_published_templates()
@@ -167,11 +251,212 @@ class Default(WorkerEntrypoint):
         privy_id = body.get("privy_user_id")
         if not isinstance(privy_id, str) or not privy_id.strip():
             return self._json(request, {"error": "privy_user_id is required"}, 400)
-        row = {k: body[k] for k in USER_FIELDS if k in body}
+        # Never trust client-supplied wallet_address for auth-sensitive flows.
+        # Legacy upsert still accepts profile fields; wallet should come from session.
+        row = {k: body[k] for k in USER_FIELDS if k in body and k != "wallet_address"}
         row["privy_user_id"] = privy_id.strip()
         rows = await Supabase(self.env).upsert_user(row)
         user = rows[0] if isinstance(rows, list) and rows else rows
         return self._json(request, {"user": user})
+
+    # ---- Auth / session ---------------------------------------------------
+    async def create_auth_session(self, request):
+        """Exchange a Privy access token (+ optional identity token) for a session cookie."""
+        app_id = _env_str(self.env, "PRIVY_APP_ID")
+        app_secret = _env_str(self.env, "PRIVY_APP_SECRET")
+        if not app_id:
+            raise HttpError(503, "PRIVY_APP_ID not configured")
+
+        auth = request.headers.get("Authorization") or ""
+        access_token = None
+        if auth.lower().startswith("bearer "):
+            access_token = auth[7:].strip()
+        body = {}
+        try:
+            text = await request.text()
+            if text:
+                body = json.loads(text)
+        except ValueError:
+            raise HttpError(400, "invalid JSON body")
+        if not access_token and isinstance(body, dict):
+            access_token = body.get("access_token") or body.get("accessToken")
+        if not isinstance(access_token, str) or not access_token:
+            raise HttpError(401, "missing Privy access token")
+
+        t0 = time.time()
+        claims = await verify_privy_jwt(access_token, app_id, cache=_JWKS_CACHE)
+        verify_ms = int((time.time() - t0) * 1000)
+        log("privy_jwt_verified", ms=verify_ms, user_id=claims["sub"])
+
+        identity_token = request.headers.get("Privy-Id-Token")
+        if not identity_token and isinstance(body, dict):
+            identity_token = body.get("identity_token") or body.get("identityToken")
+
+        wallet = await resolve_wallet_address(
+            user_id=claims["sub"],
+            app_id=app_id,
+            app_secret=app_secret,
+            identity_token=identity_token if isinstance(identity_token, str) else None,
+            jwks_cache=_JWKS_CACHE,
+        )
+
+        # Upsert user with server-derived wallet
+        sb = Supabase(self.env)
+        if sb.configured:
+            await sb.upsert_user(
+                {"privy_user_id": claims["sub"], "wallet_address": wallet}
+            )
+
+        session_id = await create_session(
+            self.env, user_id=claims["sub"], wallet_address=wallet, exp=claims["exp"]
+        )
+        cookie = session_cookie_header(session_id, claims["exp"])
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "userId": claims["sub"],
+                "walletAddress": wallet,
+                "exp": claims["exp"],
+                "verify_ms": verify_ms,
+            },
+            set_cookie=cookie,
+        )
+
+    async def get_auth_session(self, request):
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            return self._json(request, {"ok": False, "error": str(e)}, 401)
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "userId": session["userId"],
+                "walletAddress": session["walletAddress"],
+                "exp": session.get("exp"),
+            },
+        )
+
+    async def logout(self, request):
+        sid = get_session_id_from_request(request)
+        if sid:
+            await delete_session(self.env, sid)
+        cookie = session_cookie_header("", 0, clear=True)
+        return self._json(request, {"ok": True}, set_cookie=cookie)
+
+    # ---- Purchases --------------------------------------------------------
+    async def verify_purchase(self, request):
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            raise HttpError(401, str(e))
+        body = await self._json_body(request)
+        tx_hash = body.get("tx_hash") or body.get("txHash")
+        onchain_id = body.get("onchain_template_id") or body.get("onchainTemplateId")
+        template_id = body.get("template_id") or body.get("templateId")
+        if onchain_id is None:
+            raise HttpError(400, "onchain_template_id is required")
+        try:
+            onchain_id_int = int(onchain_id)
+        except (TypeError, ValueError):
+            raise HttpError(400, "onchain_template_id must be an integer")
+
+        marketplace = _env_str(self.env, "MARKETPLACE_ADDRESS", "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e")
+        rpc_url = _env_str(self.env, "MONAD_RPC_URL", "https://testnet-rpc.monad.xyz")
+
+        matched = await verify_purchase_tx(
+            tx_hash=str(tx_hash or ""),
+            buyer_wallet=session["walletAddress"],
+            onchain_template_id=onchain_id_int,
+            marketplace=marketplace,
+            rpc_url=rpc_url,
+        )
+
+        sb = Supabase(self.env)
+        user_row = None
+        if sb.configured:
+            user_row = await sb.get_by("users", "privy_user_id", session["userId"])
+        purchase_row = {
+            "tx_hash": matched["txHash"],
+            "onchain_template_id": str(matched["templateId"]),
+            "buyer_wallet": matched["buyer"],
+            "creator_wallet": matched.get("creator"),
+            "buyer_user_id": user_row["id"] if user_row else None,
+            "template_id": template_id if isinstance(template_id, str) else None,
+        }
+        try:
+            row = await sb.insert_purchase(purchase_row)
+        except SupabaseError as e:
+            if e.status in (409, 23505) or "duplicate" in str(e.detail).lower() or "unique" in str(e.detail).lower():
+                raise PurchaseError("tx hash already used", code="replay") from e
+            raise
+        return self._json(request, {"ok": True, "purchase": row, "event": matched}, 201)
+
+    # ---- Publish (relayer) ------------------------------------------------
+    async def publish_template(self, request, template_uuid):
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            raise HttpError(401, str(e))
+
+        # Per-user rate limit (relayer has ~1 MON left on testnet)
+        try:
+            rl_id = self.env.PUBLISH_RATE_LIMITS.idFromName(session["userId"])
+            rl_stub = self.env.PUBLISH_RATE_LIMITS.get(rl_id)
+            rl_resp = await rl_stub.fetch(
+                "https://rate.internal/check",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body="{}",
+            )
+            if getattr(rl_resp, "status", 500) == 429:
+                raise PublishError("publish rate limit exceeded", code="rate_limited")
+        except PublishError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log("rate_limit_error", error=repr(e))
+            # Fail open? Prefer fail closed for relayer spend.
+            raise HttpError(503, "rate limiter unavailable")
+
+        body = await self._json_body(request)
+        # Creator ALWAYS from session — ignore any body.creator / wallet fields.
+        creator = session["walletAddress"]
+        price_wei = body.get("price_wei") or body.get("priceWei")
+        parent_id = body.get("parent_id") or body.get("parentId") or 0
+        uri = body.get("uri") or body.get("metadata_uri") or body.get("metadataUri")
+        if price_wei is None:
+            raise HttpError(400, "price_wei is required")
+        if not uri:
+            # Default URI from template content hash if present
+            sb = Supabase(self.env)
+            tpl = await sb.get("templates", template_uuid)
+            if not tpl:
+                raise HttpError(404, "template not found")
+            uri = f"ipfs://edtech-monad/{template_uuid}"
+            if tpl.get("content_hash"):
+                uri = f"ipfs://edtech-monad/{tpl['content_hash']}"
+
+        result = await send_publish_for(
+            self.env,
+            creator=creator,
+            price_wei=int(price_wei),
+            parent_id=int(parent_id),
+            uri=str(uri),
+        )
+
+        sb = Supabase(self.env)
+        row = await sb.update(
+            "templates",
+            template_uuid,
+            {
+                "is_published": True,
+                "price_mon": None,  # optionally derive from price_wei later
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        log("template_published", template_id=template_uuid, tx=result.get("txHash"), creator=creator)
+        return self._json(request, {"ok": True, "template": row, "tx": result})
 
     # ---- gen Worker (service binding) --------------------------------------
     async def _gen(self, method, path, payload=None):
@@ -348,3 +633,7 @@ class Default(WorkerEntrypoint):
         if not row:
             raise HttpError(404, "template not found")
         return self._json(request, {"template": row})
+
+
+# Re-export DO classes at module level for Wrangler durable_objects.class_name
+__all__ = ["Default", "SessionDO", "PublishRateLimitDO"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy edtech-monad-gen (TS, AI generation; internal) -> edtech-monad-api (Python) -> edtech-monad-web (TanStack Start).
+# Deploy edtech-monad-gen (TS, AI) -> edtech-monad-chain (TS, relayer) -> edtech-monad-api (Python) -> edtech-monad-web.
 # Requires: CLOUDFLARE_API_TOKEN in env, Node >= 22, uv.
 # Optional: CREDS=/path/to/supabase-credentials.env (default ../supabase-credentials.env)
 set -euo pipefail
@@ -18,6 +18,19 @@ echo "Account: ${CLOUDFLARE_ACCOUNT_ID:-<auto>}"
 (cd "$ROOT/gen" && { npx wrangler r2 bucket list 2>/dev/null | grep -q 'edtech-monad-pdfs' || npx wrangler r2 bucket create edtech-monad-pdfs; } \
   && npm ci --silent && npx wrangler deploy)
 
+# 0b) Chain / relayer Worker (must exist before the API's CHAIN service binding)
+(cd "$ROOT/chain" && npm ci --silent && npx wrangler deploy)
+if [ -f "$CREDS" ]; then
+  get() { grep -E "^$1=" "$CREDS" | head -1 | cut -d= -f2- | tr -d '\r' ; }
+  RK="$(get RELAYER_PRIVATE_KEY)"
+  if [ -n "${RK:-}" ]; then
+    (cd "$ROOT/chain" && printf '%s' "$RK" | npx wrangler secret put RELAYER_PRIVATE_KEY >/dev/null && echo "RELAYER_PRIVATE_KEY secret set on chain.")
+  else
+    echo "RELAYER_PRIVATE_KEY missing in $CREDS — set later: cd chain && npx wrangler secret put RELAYER_PRIVATE_KEY"
+  fi
+  unset RK
+fi
+
 # 1) Deploy API (first pass: FRONTEND_ORIGIN unknown yet if web not deployed)
 cd "$ROOT/api"
 WEB_ORIGIN="${WEB_ORIGIN:-}"
@@ -26,10 +39,11 @@ API_URL="$(echo "$API_OUT" | grep -oE 'https://edtech-monad-api\.[a-z0-9-]+\.wor
 : "${API_URL:?could not determine API URL}"
 echo "API_URL=$API_URL"
 
-# 2) Supabase secrets (values piped via stdin, never printed)
+# 2) Supabase + Privy secrets (values piped via stdin, never printed)
 if [ -f "$CREDS" ]; then
   get() { grep -E "^$1=" "$CREDS" | head -1 | cut -d= -f2- | tr -d '\r' ; }
   SU="$(get SUPABASE_URL)"; SK="$(get SUPABASE_SERVICE_ROLE_KEY)"
+  PA="$(get PRIVY_APP_ID)"; PS="$(get PRIVY_APP_SECRET)"
   if [ -n "$SU" ]; then
     printf '%s' "$SU" | uv run pywrangler secret put SUPABASE_URL >/dev/null && echo "SUPABASE_URL secret set."
   else
@@ -40,12 +54,24 @@ if [ -f "$CREDS" ]; then
   else
     echo "SUPABASE_SERVICE_ROLE_KEY missing in $CREDS — skipping (health will report Supabase not configured)."
   fi
-  unset SU SK
+  if [ -n "${PS:-}" ]; then
+    printf '%s' "$PS" | uv run pywrangler secret put PRIVY_APP_SECRET >/dev/null && echo "PRIVY_APP_SECRET secret set."
+  else
+    echo "PRIVY_APP_SECRET missing in $CREDS — set after creating the Privy app."
+  fi
+  if [ -n "${PA:-}" ]; then
+    # App ID is a public var (also baked into the web bundle as VITE_PRIVY_APP_ID)
+    uv run pywrangler deploy ${WEB_ORIGIN:+--var FRONTEND_ORIGIN:$WEB_ORIGIN} --var "PRIVY_APP_ID:$PA" >/dev/null \
+      && echo "PRIVY_APP_ID var set."
+  fi
+  unset SU SK PA PS
 fi
 
 # 3) Build + deploy web with the API URL baked in
 cd "$ROOT/web"
-VITE_API_URL="$API_URL" npm run build
+VITE_API_URL="$API_URL" \
+  VITE_PRIVY_APP_ID="${VITE_PRIVY_APP_ID:-}" \
+  npm run build
 WEB_OUT="$(npx wrangler deploy 2>&1 | tee /dev/stderr)"
 WEB_URL="$(echo "$WEB_OUT" | grep -oE 'https://edtech-monad-web\.[a-z0-9-]+\.workers\.dev' | head -1)"
 echo "WEB_URL=$WEB_URL"

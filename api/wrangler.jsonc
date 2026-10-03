@@ -11,12 +11,34 @@
 	// PDFs, extracted page text and template JSON (shared with edtech-monad-gen).
 	"r2_buckets": [{ "binding": "PDFS", "bucket_name": "edtech-monad-pdfs" }],
 	// Internal TypeScript Worker doing text extraction + AI generation (TanStack AI on Workers AI).
-	"services": [{ "binding": "GEN", "service": "edtech-monad-gen" }],
+	"services": [
+		{ "binding": "GEN", "service": "edtech-monad-gen" },
+		// Relayer-signed publishFor (viem). workers_dev: false — only via this binding.
+		{ "binding": "CHAIN", "service": "edtech-monad-chain" }
+	],
+	"durable_objects": {
+		"bindings": [
+			{ "name": "SESSIONS", "class_name": "SessionDO" },
+			{ "name": "PUBLISH_RATE_LIMITS", "class_name": "PublishRateLimitDO" }
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1-privy-sessions",
+			"new_sqlite_classes": ["SessionDO", "PublishRateLimitDO"]
+		}
+	],
 	"vars": {
 		// Deployed frontend origin (no trailing slash). Overwritten at deploy time.
-		"FRONTEND_ORIGIN": "https://edtech-monad-web.jpgallegos20.workers.dev"
+		"FRONTEND_ORIGIN": "https://edtech-monad-web.jpgallegos20.workers.dev",
+		// Public Privy App ID (also set on web as VITE_PRIVY_APP_ID). Placeholder until Juan creates the app.
+		"PRIVY_APP_ID": "",
+		"MARKETPLACE_ADDRESS": "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
+		"MONAD_RPC_URL": "https://testnet-rpc.monad.xyz",
+		"MONAD_CHAIN_ID": "10143"
 	}
 	// Secrets (set with `uv run pywrangler secret put NAME`, never committed):
-	//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+	//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PRIVY_APP_SECRET
+	// Relayer key lives on edtech-monad-chain only: RELAYER_PRIVATE_KEY
 	// Local dev: put them in api/.dev.vars (gitignored).
 }
