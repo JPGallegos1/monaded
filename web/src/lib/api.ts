@@ -114,7 +114,10 @@ export const extractMaterial = (id: string) =>
     { method: 'POST' },
   )
 
-export const generateTemplate = (id: string, opts: { start_page?: number; end_page?: number } = {}) =>
+export const generateTemplate = (
+  id: string,
+  opts: { start_page?: number; end_page?: number; learning_style?: string } = {},
+) =>
   send<{ template: GeneratedTemplate }>(`/materials/${id}/templates`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

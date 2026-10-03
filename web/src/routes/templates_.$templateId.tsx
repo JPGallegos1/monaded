@@ -1,15 +1,41 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
+import {
+  AlignLeft,
+  BookOpen,
+  CircleCheck,
+  CircleHelp,
+  ListTree,
+  Lock,
+  Rocket,
+  Sigma,
+  Target,
+  Workflow,
+  Zap,
+} from 'lucide-react'
+import { Badge } from '#/components/ui/badge'
+import { Button } from '#/components/ui/button'
+import { Card } from '#/components/ui/card'
+import { Callout } from '#/components/callout'
+import { BuyLicenseCard } from '#/components/buy-license-card'
+import { LineageTree } from '#/components/lineage-node'
+import { MonPrice } from '#/components/mon-price'
+import { PublishDialog, PublishedSuccess } from '#/components/publish-dialog'
+import { RichText } from '#/components/math-text'
 import { getTemplate, type GeneratedTemplate } from '#/lib/api'
+import { cn } from '#/lib/utils'
 
 export const Route = createFileRoute('/templates_/$templateId')({
-  // Loader runs on the server for the first request (SSR) and in the browser on client navigation.
   loader: ({ params }) => getTemplate(params.templateId),
-  head: ({ loaderData }) => ({ meta: [{ title: `${loaderData?.title ?? 'Template'} · edtech-monad` }] }),
+  head: ({ loaderData }) => ({
+    meta: [{ title: `${loaderData?.title ?? 'Template'} · Monaded` }],
+  }),
   component: TemplateView,
   errorComponent: ({ error }) => (
-    <main className="page-wrap px-4 pt-14">
-      <p className="text-red-600">Could not load template: {error instanceof Error ? error.message : String(error)}</p>
+    <main className="page-wrap page-body">
+      <p className="text-destructive">
+        Could not load template: {error instanceof Error ? error.message : String(error)}
+      </p>
     </main>
   ),
 })
@@ -18,108 +44,377 @@ function TemplateView() {
   const t = Route.useLoaderData() as GeneratedTemplate
   const c = t.content
   const g = t.generation
+  const published = t.price_mon != null
+  const [publishOpen, setPublishOpen] = useState(false)
+  const [publishedOpen, setPublishedOpen] = useState(false)
+  const [pendingPrice, setPendingPrice] = useState<string | null>(null)
+  const [revealed, setRevealed] = useState<Record<number, boolean>>({})
+
+  const toc = [
+    { id: 'summary', label: 'Summary', icon: AlignLeft },
+    { id: 'objectives', label: 'Learning objectives', icon: Target },
+    { id: 'concepts', label: 'Key concepts', icon: BookOpen },
+    ...((c?.sections ?? []).map((s, i) => ({
+      id: `section-${i}`,
+      label: `${i + 1}. ${s.heading}`,
+      icon: ListTree,
+    })) ?? []),
+    { id: 'examples', label: 'Worked examples', icon: Sigma },
+    { id: 'practice', label: 'Practice', icon: CircleHelp },
+    { id: 'diagrams', label: 'Diagram', icon: Workflow },
+  ]
+
   return (
-    <main className="page-wrap px-4 pb-8 pt-10">
-      <h1 className="mb-1 text-3xl font-bold">{c?.title ?? t.title}</h1>
-      <p className="mb-6 text-xs opacity-70">
-        Status: {t.status}
-        {g?.model && <> · Model: {g.model}</>}
-        {g?.source_pages && (
-          <> · Source pages {g.source_pages.start}–{g.source_pages.end} of {g.source_pages.total}</>
-        )}
-        {g?.truncated && <> · input truncated to {g.limits?.max_input_chars} chars</>}
-        {g?.generate_ms != null && <> · generated in {(g.generate_ms / 1000).toFixed(1)} s</>}
-      </p>
-      {t.status === 'failed' && <p className="text-red-600">Generation failed: {t.error}</p>}
-      {!c && t.status !== 'failed' && <p>No content yet.</p>}
-      {c && (
-        <article className="flex flex-col gap-8">
-          <section>
-            <h2 className="mb-2 text-xl font-semibold">Summary</h2>
-            <p>{c.summary}</p>
-            {c.learning_objectives.length > 0 && (
-              <>
-                <h3 className="mt-4 font-semibold">Learning objectives</h3>
-                <ul className="list-disc pl-6">{c.learning_objectives.map((o, i) => <li key={i}>{o}</li>)}</ul>
-              </>
-            )}
-          </section>
-
-          <section>
-            <h2 className="mb-2 text-xl font-semibold">Sections ({c.sections.length})</h2>
-            {c.sections.map((s, i) => (
-              <div key={i} className="mb-4">
-                <h3 className="font-semibold">{i + 1}. {s.heading}</h3>
-                <p>{s.explanation}</p>
-                {s.key_concepts.length > 0 && <p className="text-sm">Key concepts: {s.key_concepts.join(' · ')}</p>}
-              </div>
+    <main className="min-h-[70vh]">
+      <div className="page-wrap flex flex-col gap-0 lg:flex-row">
+        {/* TOC */}
+        <aside className="hidden w-60 shrink-0 border-r border-border py-8 pr-2 lg:block">
+          <p className="mb-3 px-3 text-[11px] font-semibold tracking-wider text-muted-foreground">
+            ON THIS PAGE
+          </p>
+          <nav className="flex flex-col gap-1">
+            {toc.map((item, i) => (
+              <a
+                key={item.id}
+                href={`#${item.id}`}
+                className={cn(
+                  'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm no-underline',
+                  i === 0
+                    ? 'bg-accent font-semibold text-accent-foreground'
+                    : 'font-medium text-muted-foreground hover:bg-muted',
+                )}
+              >
+                <item.icon className="h-4 w-4" />
+                <span className="truncate">{item.label}</span>
+              </a>
             ))}
-          </section>
+          </nav>
+        </aside>
 
-          {c.definitions.length > 0 && (
-            <section>
-              <h2 className="mb-2 text-xl font-semibold">Definitions</h2>
-              <dl>
-                {c.definitions.map((d, i) => (
-                  <div key={i} className="mb-2">
-                    <dt className="font-semibold">{d.term}</dt>
-                    <dd className="ml-4">{d.definition}</dd>
+        {/* Content */}
+        <article className="min-w-0 flex-1 px-0 py-10 lg:px-12">
+          <div className="mb-8 flex flex-col gap-3">
+            <div className="flex flex-wrap gap-2">
+              <Badge>Study template</Badge>
+              <Badge variant="outline">
+                {g?.model ? `AI-generated · ${shortModel(g.model)}` : 'AI-generated'}
+              </Badge>
+              {t.parent_template_id && <Badge variant="outline">Fork</Badge>}
+            </div>
+            <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
+              {c?.title ?? t.title}
+            </h1>
+            {c?.summary && (
+              <p id="summary" className="max-w-2xl text-base leading-relaxed text-muted-foreground">
+                <RichText text={c.summary} />
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Status: {t.status}
+              {g?.source_pages && (
+                <>
+                  {' '}
+                  · Pages {g.source_pages.start}–{g.source_pages.end} of {g.source_pages.total}
+                </>
+              )}
+              {g?.generate_ms != null && <> · {(g.generate_ms / 1000).toFixed(1)} s</>}
+            </p>
+          </div>
+
+          {t.status === 'failed' && (
+            <p className="mb-6 text-destructive">Generation failed: {t.error}</p>
+          )}
+          {!c && t.status !== 'failed' && <p>No content yet.</p>}
+
+          {c && (
+            <div className="flex flex-col gap-10">
+              {c.learning_objectives.length > 0 && (
+                <section id="objectives" className="flex flex-col gap-3">
+                  <SectionHeading n="01" title="Learning objectives" />
+                  {c.learning_objectives.map((o, i) => (
+                    <div key={i} className="flex items-start gap-2.5 text-[15px]">
+                      <CircleCheck className="mt-0.5 h-[18px] w-[18px] shrink-0 text-primary" />
+                      <RichText text={o} />
+                    </div>
+                  ))}
+                </section>
+              )}
+
+              {c.definitions.length > 0 && (
+                <section id="concepts" className="flex flex-col gap-3">
+                  <SectionHeading n="02" title="Key concepts" />
+                  {c.definitions.map((d, i) => (
+                    <Callout key={i} term={d.term} body={d.definition} />
+                  ))}
+                </section>
+              )}
+
+              {c.sections.map((s, i) => (
+                <section key={i} id={`section-${i}`} className="flex flex-col gap-3">
+                  <SectionHeading n={String(i + 1).padStart(2, '0')} title={s.heading} />
+                  <p className="leading-relaxed text-foreground">
+                    <RichText text={s.explanation} />
+                  </p>
+                  {s.key_concepts.length > 0 && (
+                    <p className="text-sm text-muted-foreground">
+                      Key concepts: {s.key_concepts.join(' · ')}
+                    </p>
+                  )}
+                </section>
+              ))}
+
+              {c.worked_examples.length > 0 && (
+                <section id="examples" className="flex flex-col gap-4">
+                  <SectionHeading n="03" title="Worked examples" />
+                  {c.worked_examples.map((w, i) => (
+                    <Card key={i} className="flex flex-col gap-2.5 p-5">
+                      <h3 className="text-[15px] font-semibold">{w.title}</h3>
+                      <div className="rounded-md bg-muted px-4 py-3 font-math text-[15px] whitespace-pre-wrap">
+                        <RichText text={w.problem} />
+                      </div>
+                      <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+                        {w.steps.map((step, j) => (
+                          <li key={j}>
+                            <RichText text={step} />
+                          </li>
+                        ))}
+                      </ol>
+                      <p className="text-sm">
+                        <strong>Answer:</strong> <RichText text={w.answer} />
+                      </p>
+                    </Card>
+                  ))}
+                </section>
+              )}
+
+              {c.practice_questions.length > 0 && (
+                <section id="practice" className="flex flex-col gap-4">
+                  <SectionHeading n="04" title="Practice" />
+                  {c.practice_questions.map((q, i) => (
+                    <Card key={i} className="flex flex-col gap-3 p-5">
+                      <div className="flex flex-wrap gap-2">
+                        <Badge>
+                          Question {i + 1} of {c.practice_questions.length}
+                        </Badge>
+                        <Badge variant="outline">{q.type.replace('_', ' ')}</Badge>
+                      </div>
+                      <p className="text-[15px] font-medium whitespace-pre-wrap">
+                        <RichText text={q.question} />
+                      </p>
+                      {q.choices.length > 0 && (
+                        <ul className="list-[lower-alpha] space-y-1 pl-6 text-sm">
+                          {q.choices.map((ch, j) => (
+                            <li key={j}>
+                              <RichText text={ch} />
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="flex gap-2">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => setRevealed((r) => ({ ...r, [i]: true }))}
+                        >
+                          Reveal answer
+                        </Button>
+                      </div>
+                      {revealed[i] && (
+                        <div className="rounded-md bg-success-soft p-3.5">
+                          <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-semibold text-success">
+                            <CircleCheck className="h-4 w-4" />
+                            Answer
+                          </div>
+                          <p className="font-math text-[15px]">
+                            <RichText text={q.answer} />
+                          </p>
+                          {q.explanation && (
+                            <p className="mt-1 text-sm text-muted-foreground">
+                              <RichText text={q.explanation} />
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </Card>
+                  ))}
+                </section>
+              )}
+
+              {c.diagrams.length > 0 && (
+                <section id="diagrams" className="flex flex-col gap-4">
+                  <SectionHeading n="05" title="Diagram" />
+                  {c.diagrams.map((d, i) => (
+                    <Card key={i} className="p-5">
+                      <p className="mb-2 text-sm font-semibold">Diagram · {d.title}</p>
+                      <p className="mb-4 text-sm text-muted-foreground">{d.description}</p>
+                      <div className="rounded-md bg-muted p-6">
+                        <Mermaid id={`d${i}`} source={d.mermaid} />
+                      </div>
+                    </Card>
+                  ))}
+                </section>
+              )}
+
+              {/* Buyer lineage placeholder when published as fork */}
+              {published && t.parent_template_id && (
+                <Card className="flex flex-col gap-4 p-6">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-semibold">Royalty lineage</h3>
+                    <Badge variant="outline">Fork</Badge>
                   </div>
-                ))}
-              </dl>
-            </section>
-          )}
-
-          {c.worked_examples.length > 0 && (
-            <section>
-              <h2 className="mb-2 text-xl font-semibold">Worked examples</h2>
-              {c.worked_examples.map((w, i) => (
-                <div key={i} className="mb-4">
-                  <h3 className="font-semibold">{w.title}</h3>
-                  <p className="whitespace-pre-wrap">{w.problem}</p>
-                  <ol className="list-decimal pl-6">{w.steps.map((s, j) => <li key={j}>{s}</li>)}</ol>
-                  <p><strong>Answer:</strong> {w.answer}</p>
-                </div>
-              ))}
-            </section>
-          )}
-
-          <section>
-            <h2 className="mb-2 text-xl font-semibold">Practice questions ({c.practice_questions.length})</h2>
-            <ol className="list-decimal pl-6">
-              {c.practice_questions.map((q, i) => (
-                <li key={i} className="mb-3">
-                  <p className="whitespace-pre-wrap">{q.question}</p>
-                  {q.choices.length > 0 && <ul className="list-[lower-alpha] pl-6">{q.choices.map((ch, j) => <li key={j}>{ch}</li>)}</ul>}
-                  <details>
-                    <summary className="cursor-pointer text-sm">Show answer</summary>
-                    <p><strong>{q.answer}</strong></p>
-                    <p className="text-sm">{q.explanation}</p>
-                  </details>
-                </li>
-              ))}
-            </ol>
-          </section>
-
-          {c.diagrams.length > 0 && (
-            <section>
-              <h2 className="mb-2 text-xl font-semibold">Diagrams</h2>
-              {c.diagrams.map((d, i) => (
-                <figure key={i} className="mb-6">
-                  <figcaption className="font-semibold">{d.title}</figcaption>
-                  <p className="text-sm">{d.description}</p>
-                  <Mermaid id={`d${i}`} source={d.mermaid} />
-                </figure>
-              ))}
-            </section>
+                  <p className="text-[13px] text-muted-foreground">
+                    Lineage data is not available from the API yet. When wired, this tree will show
+                    cascading royalty splits (10% per level, up to 3).
+                  </p>
+                  <LineageTree
+                    nodes={[
+                      {
+                        name: 'Original creator',
+                        role: 'Original · Level 0 · 10%',
+                        earn: 'TODO',
+                        earnMuted: true,
+                      },
+                      {
+                        name: 'This template',
+                        role: 'Creator',
+                        earn: 'TODO',
+                        highlight: true,
+                        earnMuted: true,
+                      },
+                    ]}
+                  />
+                  <p className="font-mono text-xs text-muted-foreground">
+                    TODO: fetch parent chain + compute MON split from onchain events
+                  </p>
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Zap className="h-3.5 w-3.5" />
+                    All payouts happen in the same transaction on Monad.
+                  </div>
+                </Card>
+              )}
+            </div>
           )}
         </article>
-      )}
+
+        {/* Rail */}
+        <aside className="w-full shrink-0 py-10 lg:w-80 lg:pl-0 lg:pr-0">
+          <div className="flex flex-col gap-4 lg:sticky lg:top-24">
+            {!published ? (
+              <Card className="flex flex-col gap-3 p-5">
+                <div className="flex items-center justify-between">
+                  <MonPrice amount="Not published" />
+                  <Badge variant="outline">Draft</Badge>
+                </div>
+                <p className="text-[13px] leading-relaxed text-muted-foreground">
+                  Publish this template on Monad to sell licenses and earn royalties from forks.
+                </p>
+                <Button onClick={() => setPublishOpen(true)}>
+                  <Rocket className="h-4 w-4" />
+                  Publish onchain
+                </Button>
+                {/* TODO(privy): PublishDialog.onPublish → contract mint */}
+              </Card>
+            ) : (
+              <BuyLicenseCard
+                price={t.price_mon}
+                onBuy={() => {
+                  // TODO(privy): call TemplateMarketplace.buy()
+                }}
+                onFork={() => {
+                  window.location.href = `/fork/${t.id}`
+                }}
+                meta={[
+                  { label: 'Sections', value: String(c?.sections.length ?? '—') },
+                  { label: 'Questions', value: String(c?.practice_questions.length ?? '—') },
+                  {
+                    label: 'Published',
+                    value: t.created_at
+                      ? new Date(t.created_at).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })
+                      : '—',
+                  },
+                ]}
+              />
+            )}
+
+            <Card className="flex flex-col gap-2.5 p-5">
+              <p className="text-sm font-semibold">Template info</p>
+              {[
+                ['Status', t.status ?? '—'],
+                [
+                  'Pages',
+                  g?.source_pages
+                    ? `${g.source_pages.start} to ${g.source_pages.end}`
+                    : '—',
+                ],
+                ['Sections', String(c?.sections.length ?? '—')],
+                ['Questions', String(c?.practice_questions.length ?? '—')],
+                ['Model', g?.model ? shortModel(g.model) : '—'],
+              ].map(([a, b]) => (
+                <div key={a} className="flex justify-between text-[13px]">
+                  <span className="text-muted-foreground">{a}</span>
+                  <span className="font-medium">{b}</span>
+                </div>
+              ))}
+            </Card>
+
+            {published && !c && (
+              <div className="surface-card relative overflow-hidden p-6 opacity-60">
+                <Lock className="mx-auto mb-2 h-5 w-5" />
+                <p className="text-center text-sm font-medium">
+                  Buy a license to unlock the full template
+                </p>
+              </div>
+            )}
+
+            <Link
+              to="/templates"
+              className="text-center text-sm text-muted-foreground no-underline hover:text-foreground"
+            >
+              ← Back to marketplace
+            </Link>
+          </div>
+        </aside>
+      </div>
+
+      <PublishDialog
+        open={publishOpen}
+        title={c?.title ?? t.title}
+        onClose={() => setPublishOpen(false)}
+        onPublish={({ priceMon }) => {
+          // Presentational only — no contract call in this PR
+          setPendingPrice(priceMon)
+          setPublishOpen(false)
+          setPublishedOpen(true)
+        }}
+      />
+      <PublishedSuccess
+        open={publishedOpen}
+        price={pendingPrice ?? undefined}
+        onClose={() => setPublishedOpen(false)}
+        listingHref={`/templates/${t.id}`}
+      />
     </main>
   )
 }
 
-/** Client-only Mermaid render; falls back to the raw source if the model produced invalid syntax. */
+function SectionHeading({ n, title }: { n: string; title: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="font-mono text-[13px] font-semibold text-primary">{n}</span>
+      <h2 className="font-display text-[22px] font-bold tracking-tight">{title}</h2>
+    </div>
+  )
+}
+
+function shortModel(m: string) {
+  const parts = m.split('/')
+  return parts[parts.length - 1] ?? m
+}
+
 function Mermaid({ id, source }: { id: string; source: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const [failed, setFailed] = useState<string | null>(null)
@@ -127,7 +422,7 @@ function Mermaid({ id, source }: { id: string; source: string }) {
     let cancelled = false
     import('mermaid')
       .then(async ({ default: mermaid }) => {
-        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' })
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' })
         const { svg } = await mermaid.render(`mermaid-${id}`, source)
         if (!cancelled && ref.current) ref.current.innerHTML = svg
       })
@@ -139,7 +434,9 @@ function Mermaid({ id, source }: { id: string; source: string }) {
   return (
     <div>
       <div ref={ref} className="mermaid-diagram overflow-x-auto" />
-      {failed && <p className="text-xs text-red-600">Diagram could not be rendered ({failed}). Source:</p>}
+      {failed && (
+        <p className="text-xs text-destructive">Diagram could not be rendered ({failed}). Source:</p>
+      )}
       {failed && <pre className="overflow-x-auto text-xs">{source}</pre>}
     </div>
   )

@@ -10,13 +10,32 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as LibraryRouteImport } from './routes/library'
+import { Route as SigninRouteImport } from './routes/signin'
 import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as UploadRouteImport } from './routes/upload'
+import { Route as ForkTemplateIdRouteImport } from './routes/fork.$templateId'
 import { Route as TemplatesTemplateIdRouteImport } from './routes/templates_.$templateId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardRoute = DashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LibraryRoute = LibraryRouteImport.update({
+  id: '/library',
+  path: '/library',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SigninRoute = SigninRouteImport.update({
+  id: '/signin',
+  path: '/signin',
   getParentRoute: () => rootRouteImport,
 } as any)
 const TemplatesRoute = TemplatesRouteImport.update({
@@ -29,6 +48,11 @@ const UploadRoute = UploadRouteImport.update({
   path: '/upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ForkTemplateIdRoute = ForkTemplateIdRouteImport.update({
+  id: '/fork/$templateId',
+  path: '/fork/$templateId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TemplatesTemplateIdRoute = TemplatesTemplateIdRouteImport.update({
   id: '/templates_/$templateId',
   path: '/templates/$templateId',
@@ -37,35 +61,76 @@ const TemplatesTemplateIdRoute = TemplatesTemplateIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/dashboard': typeof DashboardRoute
+  '/library': typeof LibraryRoute
+  '/signin': typeof SigninRoute
   '/templates': typeof TemplatesRoute
   '/upload': typeof UploadRoute
+  '/fork/$templateId': typeof ForkTemplateIdRoute
   '/templates/$templateId': typeof TemplatesTemplateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/dashboard': typeof DashboardRoute
+  '/library': typeof LibraryRoute
+  '/signin': typeof SigninRoute
   '/templates': typeof TemplatesRoute
   '/upload': typeof UploadRoute
+  '/fork/$templateId': typeof ForkTemplateIdRoute
   '/templates/$templateId': typeof TemplatesTemplateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/dashboard': typeof DashboardRoute
+  '/library': typeof LibraryRoute
+  '/signin': typeof SigninRoute
   '/templates': typeof TemplatesRoute
   '/upload': typeof UploadRoute
+  '/fork/$templateId': typeof ForkTemplateIdRoute
   '/templates_/$templateId': typeof TemplatesTemplateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/templates' | '/upload' | '/templates/$templateId'
+  fullPaths:
+    | '/'
+    | '/dashboard'
+    | '/library'
+    | '/signin'
+    | '/templates'
+    | '/upload'
+    | '/fork/$templateId'
+    | '/templates/$templateId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/templates' | '/upload' | '/templates/$templateId'
-  id: '__root__' | '/' | '/templates' | '/upload' | '/templates_/$templateId'
+  to:
+    | '/'
+    | '/dashboard'
+    | '/library'
+    | '/signin'
+    | '/templates'
+    | '/upload'
+    | '/fork/$templateId'
+    | '/templates/$templateId'
+  id:
+    | '__root__'
+    | '/'
+    | '/dashboard'
+    | '/library'
+    | '/signin'
+    | '/templates'
+    | '/upload'
+    | '/fork/$templateId'
+    | '/templates_/$templateId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  DashboardRoute: typeof DashboardRoute
+  LibraryRoute: typeof LibraryRoute
+  SigninRoute: typeof SigninRoute
   TemplatesRoute: typeof TemplatesRoute
   UploadRoute: typeof UploadRoute
+  ForkTemplateIdRoute: typeof ForkTemplateIdRoute
   TemplatesTemplateIdRoute: typeof TemplatesTemplateIdRoute
 }
 
@@ -76,6 +141,27 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard': {
+      id: '/dashboard'
+      path: '/dashboard'
+      fullPath: '/dashboard'
+      preLoaderRoute: typeof DashboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/library': {
+      id: '/library'
+      path: '/library'
+      fullPath: '/library'
+      preLoaderRoute: typeof LibraryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/signin': {
+      id: '/signin'
+      path: '/signin'
+      fullPath: '/signin'
+      preLoaderRoute: typeof SigninRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/templates': {
@@ -92,6 +178,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UploadRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/fork/$templateId': {
+      id: '/fork/$templateId'
+      path: '/fork/$templateId'
+      fullPath: '/fork/$templateId'
+      preLoaderRoute: typeof ForkTemplateIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/templates_/$templateId': {
       id: '/templates_/$templateId'
       path: '/templates/$templateId'
@@ -104,8 +197,12 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  DashboardRoute: DashboardRoute,
+  LibraryRoute: LibraryRoute,
+  SigninRoute: SigninRoute,
   TemplatesRoute: TemplatesRoute,
   UploadRoute: UploadRoute,
+  ForkTemplateIdRoute: ForkTemplateIdRoute,
   TemplatesTemplateIdRoute: TemplatesTemplateIdRoute,
 }
 export const routeTree = rootRouteImport
