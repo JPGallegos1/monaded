@@ -1,0 +1,23 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	// edtech-monad-gen: PDF text extraction + AI study-template generation (TypeScript, TanStack AI).
+	// Internal only: reachable exclusively through the `GEN` service binding of edtech-monad-api.
+	// It never talks to Supabase (the Python API owns all DB writes).
+	"name": "edtech-monad-gen",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"workers_dev": false,
+	"preview_urls": false,
+	"observability": { "enabled": true, "traces": { "enabled": true } },
+	"ai": { "binding": "AI" },
+	"r2_buckets": [{ "binding": "PDFS", "bucket_name": "edtech-monad-pdfs" }],
+	"vars": {
+		// Workers AI chat model used through @tanstack/ai-cloudflare. Override per deploy with --var AI_MODEL:<id>.
+		"AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
+		// Hard caps for one generation (small-context 8B model; ~2.8 chars/token on math text).
+		"MAX_PAGES": "12",
+		"MAX_INPUT_CHARS": "24000",
+		"MAX_OUTPUT_TOKENS": "6000"
+	}
+}

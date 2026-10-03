@@ -1,0 +1,20 @@
+{
+  "name": "edtech-monad-gen",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@tanstack/ai": "^0.64.0",
+    "@tanstack/ai-cloudflare": "^0.2.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261003.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.147.0"
+  },
+  "private": true,
+  "type": "module"
+}
