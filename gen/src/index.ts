@@ -20,6 +20,10 @@ export interface Env {
   MAX_PAGES: string
   MAX_INPUT_CHARS: string
   MAX_OUTPUT_TOKENS: string
+  /** Optional, for reasoning models (e.g. Qwen 3.8): 'low' | 'medium' | 'high'. Unset = model default. */
+  AI_REASONING_EFFORT?: string
+  /** 'true' = run non-streaming AI calls as a stream on the wire and aggregate (see streamAggregatingBinding). */
+  AI_STREAM_AGGREGATE?: string
 }
 
 const json = (data: unknown, status = 200) =>
@@ -170,31 +174,48 @@ async function generate(env: Env, body: Record<string, unknown>) {
   const dec = new TextDecoder()
   const pageText = (p: number) => clean(dec.decode(bytes.subarray(index.offsets[p - 1] - from, index.offsets[p] - from)))
 
-  let excerpt = ''
-  let lastPageUsed = start - 1
-  for (let p = start; p <= end; p++) {
-    const chunk = `\n[Page ${p}]\n${pageText(p)}\n`
-    if (excerpt.length + chunk.length > maxChars) {
-      if (p === start) excerpt = chunk.slice(0, maxChars) // single huge page
-      if (p === start) lastPageUsed = p
-      break
+  /** Whole pages from `start` while they fit in `budget` chars (a single oversized page is cut). */
+  const buildExcerpt = (budget: number) => {
+    let text = ''
+    let last = start - 1
+    for (let p = start; p <= end; p++) {
+      const chunk = `\n[Page ${p}]\n${pageText(p)}\n`
+      if (text.length + chunk.length > budget) {
+        if (p === start) {
+          text = chunk.slice(0, budget)
+          last = p
+        }
+        break
+      }
+      text += chunk
+      last = p
     }
-    excerpt += chunk
-    lastPageUsed = p
+    return { text, last }
   }
-  const truncated = lastPageUsed < requestedEnd
-  if (!excerpt.trim()) throw new HttpError(422, 'selected pages contain no extractable text')
+  const first = buildExcerpt(maxChars)
+  if (!first.text.trim()) throw new HttpError(422, 'selected pages contain no extractable text')
+  let excerpt = first.text
+  let lastPageUsed = first.last
 
   const style = typeof body.learning_style === 'string' && body.learning_style ? body.learning_style : 'balanced'
   const model = env.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast'
   // Cast: the adapter pins @cloudflare/workers-types v4, this project uses v5 (identical runtime binding).
-  const adapter = new NonStreamingCloudflareText({ binding: env.AI as any }, model)
+  const binding = env.AI_STREAM_AGGREGATE === 'true' ? streamAggregatingBinding(env.AI) : env.AI
+  const adapter = new NonStreamingCloudflareText({ binding: binding as any }, model)
 
   const t0 = Date.now()
   let template: StudyTemplate | null = null
   let lastErr: unknown
   let attempts = 0
+  const usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
+  const effort = env.AI_REASONING_EFFORT as 'low' | 'medium' | 'high' | undefined
   for (attempts = 1; attempts <= 2 && !template; attempts++) {
+    if (attempts > 1) {
+      // Retry with fewer pages (~60% of the first excerpt) and record what was actually sent.
+      const retry = buildExcerpt(Math.round(first.text.length * 0.6))
+      excerpt = retry.text
+      lastPageUsed = retry.last
+    }
     try {
       template = await chat({
         adapter,
@@ -202,16 +223,27 @@ async function generate(env: Env, body: Record<string, unknown>) {
         messages: [
           {
             role: 'user',
-            content: `Learning style: ${style}.\nCreate a study guide for this excerpt (pages ${start}-${lastPageUsed}).\n\nEXCERPT:\n${attempts === 1 ? excerpt : excerpt.slice(0, Math.round(excerpt.length * 0.6))}`,
+            content: `Learning style: ${style}.\nCreate a study guide for this excerpt (pages ${start}-${lastPageUsed}).\n\nEXCERPT:\n${excerpt}`,
           },
         ],
         outputSchema: StudyTemplateSchema,
+        // Token accounting across attempts (fires for the structured-output call too).
+        middleware: [
+          {
+            name: 'usage-capture',
+            onUsage: (_ctx, u) => {
+              usage.prompt_tokens += u.promptTokens ?? 0
+              usage.completion_tokens += u.completionTokens ?? 0
+            },
+          },
+        ],
         // Retry (after e.g. finish_reason=length from a repetition loop) uses a shorter excerpt and a
         // mild repetition penalty.
         modelOptions: {
           max_tokens: Number(env.MAX_OUTPUT_TOKENS) || 6000,
           temperature: attempts === 1 ? 0.3 : 0.2,
           ...(attempts > 1 ? { repetition_penalty: 1.1 } : {}),
+          ...(effort ? { reasoning_effort: effort } : {}),
         },
       })
     } catch (e) {
@@ -228,10 +260,13 @@ async function generate(env: Env, body: Record<string, unknown>) {
     model,
     sdk: '@tanstack/ai + @tanstack/ai-cloudflare (Workers AI binding)',
     source_pages: { start, end: lastPageUsed, requested_end: requestedEnd, total: pageCount },
+    // true when fewer pages than requested were sent (char budget, page cap, or a shorter retry)
     input_chars: excerpt.length,
-    truncated,
+    truncated: lastPageUsed < requestedEnd,
     limits: { max_pages: maxPages, max_input_chars: maxChars },
     attempts,
+    usage,
+    reasoning_effort: effort ?? null,
     generate_ms: ms,
     learning_style: style,
   }
@@ -295,6 +330,63 @@ function safeMermaid(src: string): string {
     .replace(/^```(?:mermaid)?\s*|\s*```$/g, '')
     .replace(/\b([A-Za-z][\w-]*)\[(?!")([^\]\n]*)\]/g, (_m, id: string, label: string) => `${id}["${label.replace(/"/g, '#quot;')}"]`)
     .trim()
+}
+
+/**
+ * Long non-streaming Workers AI calls on some models (seen with @cf/qwen/qwen3.8-27b, ~5.5k output
+ * tokens) fail with "408 AiError: Request timeout" (code 3046) after ~6 min, while the same request
+ * streamed finishes in ~110 s. This wraps the AI binding so a `stream: false` chat call is sent with
+ * `stream: true` and the SSE is folded back into one OpenAI chat.completion JSON. TanStack AI still
+ * sees a normal non-streaming response, and the fold is a single cheap pass (low CPU).
+ */
+function streamAggregatingBinding(ai: Ai): Ai {
+  const run = ai.run.bind(ai) as (m: string, i: Record<string, unknown>, o?: Record<string, unknown>) => Promise<unknown>
+  const wrapped = {
+    run: async (model: string, inputs: Record<string, unknown>, options?: Record<string, unknown>) => {
+      if (inputs?.stream === true || !Array.isArray(inputs?.messages)) return run(model, inputs, options)
+      const res = (await run(model, { ...inputs, stream: true }, { ...options, returnRawResponse: true })) as Response
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('text/event-stream')) return res
+      const text = await res.text()
+      let content = ''
+      let reasoning = ''
+      let finish: string | null = null
+      let usage: unknown
+      let id = ''
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue
+        let e: any
+        try {
+          e = JSON.parse(line.slice(6))
+        } catch {
+          continue
+        }
+        if (e.id) id = e.id
+        if (e.usage) usage = e.usage
+        const c = e.choices?.[0]
+        if (c?.delta?.content) content += c.delta.content
+        const r = c?.delta?.reasoning_content ?? c?.delta?.reasoning
+        if (typeof r === 'string') reasoning += r
+        if (c?.finish_reason) finish = c.finish_reason
+        if (typeof e.response === 'string') content += e.response // native Workers AI stream shape
+      }
+      const body = {
+        id: id || `agg-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: finish ?? 'stop',
+            message: { role: 'assistant', content, ...(reasoning ? { reasoning_content: reasoning } : {}) },
+          },
+        ],
+        usage,
+      }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  }
+  return new Proxy(ai, { get: (t, k) => (k === 'run' ? wrapped.run : Reflect.get(t, k)) }) as Ai
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.trunc(n)))
