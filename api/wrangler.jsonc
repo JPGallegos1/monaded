@@ -10,7 +10,7 @@
 	},
 	"vars": {
 		// Deployed frontend origin (no trailing slash). Overwritten at deploy time.
-		"FRONTEND_ORIGIN": "https://edtech-monad-web.example.workers.dev"
+		"FRONTEND_ORIGIN": "https://edtech-monad-web.jpgallegos20.workers.dev"
 	}
 	// Secrets (set with `uv run pywrangler secret put NAME`, never committed):
 	//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY

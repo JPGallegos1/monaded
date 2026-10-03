@@ -26,12 +26,15 @@ echo "API_URL=$API_URL"
 if [ -f "$CREDS" ]; then
   get() { grep -E "^$1=" "$CREDS" | head -1 | cut -d= -f2- | tr -d '\r' ; }
   SU="$(get SUPABASE_URL)"; SK="$(get SUPABASE_SERVICE_ROLE_KEY)"
-  if [ -n "$SU" ] && [ -n "$SK" ]; then
-    printf '%s' "$SU" | uv run pywrangler secret put SUPABASE_URL >/dev/null
-    printf '%s' "$SK" | uv run pywrangler secret put SUPABASE_SERVICE_ROLE_KEY >/dev/null
-    echo "Supabase secrets set."
+  if [ -n "$SU" ]; then
+    printf '%s' "$SU" | uv run pywrangler secret put SUPABASE_URL >/dev/null && echo "SUPABASE_URL secret set."
   else
-    echo "Supabase URL and/or service role key missing in $CREDS — skipping secrets."
+    echo "SUPABASE_URL missing in $CREDS — skipping."
+  fi
+  if [ -n "$SK" ]; then
+    printf '%s' "$SK" | uv run pywrangler secret put SUPABASE_SERVICE_ROLE_KEY >/dev/null && echo "SUPABASE_SERVICE_ROLE_KEY secret set."
+  else
+    echo "SUPABASE_SERVICE_ROLE_KEY missing in $CREDS — skipping (health will report Supabase not configured)."
   fi
   unset SU SK
 fi
