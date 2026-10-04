@@ -28,9 +28,7 @@ class _Supabase(Protocol):
 DEFAULT_CHAIN_ID = 10143
 ALLOWED_CHAIN_ID = 10143
 DEFAULT_CONTRACT = "0xc8c9cd5a19b4fc27b209adf75eda442c798ab59e"
-ALLOWED_CONTRACT = "0xc8c9cd5a19b4fc27b209adf75eda442c798ab59e"
-# Checksum form from deploy artifacts (comparisons are case-insensitive).
-ALLOWED_CONTRACT_CHECKSUM = "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e"
+ALLOWED_CONTRACT = "0xc8c9cd5a19b4fc27b209adf75eda442c798ab59e"  # 0xC8c9…Ab59e, compared case-insensitively
 
 # Events that get typed table rows (plus always chain_events).
 TYPED_EVENTS = frozenset(
