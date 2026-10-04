@@ -83,9 +83,10 @@ from indexer import (
     DEFAULT_CHAIN_ID,
     DEFAULT_CONTRACT,
     IndexerError,
+    assert_allowed_scope,
     get_cursor,
     ingest_events,
-    norm_contract,
+    parse_ingest_payload,
     require_internal,
 )
 
@@ -427,8 +428,10 @@ class Default(WorkerEntrypoint):
                 if "=" in part:
                     k, v = part.split("=", 1)
                     params[k] = v
-        chain_id = int(params.get("chain_id") or DEFAULT_CHAIN_ID)
-        contract = norm_contract(params.get("contract") or DEFAULT_CONTRACT)
+        chain_id, contract = assert_allowed_scope(
+            chain_id=params.get("chain_id", DEFAULT_CHAIN_ID),
+            contract=params.get("contract", DEFAULT_CONTRACT),
+        )
         sb = Supabase(self.env)
         cursor = await get_cursor(sb, chain_id=chain_id, contract=contract)
         return self._json(request, {"ok": True, "cursor": cursor})
@@ -436,17 +439,7 @@ class Default(WorkerEntrypoint):
     async def indexer_events(self, request):
         require_internal(self.env, request)
         body = await self._json_body(request)
-        chain_id = int(body.get("chain_id") or DEFAULT_CHAIN_ID)
-        contract = norm_contract(body.get("contract") or DEFAULT_CONTRACT)
-        try:
-            from_block = int(body["from_block"])
-            to_block = int(body["to_block"])
-        except (KeyError, TypeError, ValueError) as e:
-            raise IndexerError("from_block and to_block required", code="bad_range") from e
-        events = body.get("events") or []
-        advance = body.get("advance_cursor", True)
-        if not isinstance(advance, bool):
-            advance = bool(advance)
+        chain_id, contract, from_block, to_block, events, advance = parse_ingest_payload(body)
         sb = Supabase(self.env)
         result = await ingest_events(
             sb,
@@ -454,7 +447,7 @@ class Default(WorkerEntrypoint):
             contract=contract,
             from_block=from_block,
             to_block=to_block,
-            events=events if isinstance(events, list) else [],
+            events=events,
             advance=advance,
         )
         log(
