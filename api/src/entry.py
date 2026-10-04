@@ -41,7 +41,13 @@ from ownership import (
     validate_publish_price,
     validate_publish_uri,
 )
-from publish import PublishError, send_publish_for
+from publish import (
+    PublishError,
+    build_publish_broadcast_patch,
+    build_publish_success_patch,
+    recoverable_publish_state,
+    send_publish_for,
+)
 from purchase import PurchaseError, verify_purchase_tx
 from purchase_resolve import onchain_id_from_template, resolve_template_for_purchase
 from rate_limit_do import GLOBAL_DO_NAME, PublishRateLimitDO  # noqa: F401
@@ -445,8 +451,7 @@ class Default(WorkerEntrypoint):
         except ValueError as e:
             raise HttpError(401, str(e))
 
-        await self._check_publish_rate_limits(session["userId"])
-
+        # Validate request before charging rate limits (invalid input must not consume caps).
         body = await self._json_body(request)
         # Creator ALWAYS from session — ignore any body.creator / wallet / uri fields.
         creator = session["walletAddress"]
@@ -467,6 +472,25 @@ class Default(WorkerEntrypoint):
 
         uri = validate_publish_uri(build_publish_uri(tpl))
 
+        # Idempotent retry: prior broadcast left recoverable state — finalize only.
+        prior = recoverable_publish_state(tpl)
+        if prior is not None:
+            patch = build_publish_success_patch(
+                tx_hash=prior.get("txHash"),
+                onchain_token_id=prior.get("templateId"),
+                price_wei=price_wei_int,
+            )
+            row = await sb.update("templates", template_uuid, patch)
+            log(
+                "template_publish_reconciled",
+                template_id=template_uuid,
+                tx=prior.get("txHash"),
+                creator=creator,
+            )
+            return self._json(request, {"ok": True, "template": row, "tx": prior, "reconciled": True})
+
+        await self._check_publish_rate_limits(session["userId"])
+
         result = await send_publish_for(
             self.env,
             creator=creator,
@@ -475,19 +499,34 @@ class Default(WorkerEntrypoint):
             uri=uri,
         )
 
-        patch = {
-            "is_published": True,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        if result.get("templateId"):
-            patch["onchain_token_id"] = str(result["templateId"])
-        # Approximate MON price for listings (wei / 1e18) when numeric column allows it
+        tx_hash = result.get("txHash")
+        token_id = str(result["templateId"]) if result.get("templateId") is not None else None
+        patch = build_publish_success_patch(
+            tx_hash=tx_hash,
+            onchain_token_id=token_id,
+            price_wei=price_wei_int,
+        )
         try:
-            patch["price_mon"] = price_wei_int / 10**18
-        except Exception:  # noqa: BLE001
-            pass
-        row = await sb.update("templates", template_uuid, patch)
-        log("template_published", template_id=template_uuid, tx=result.get("txHash"), creator=creator)
+            row = await sb.update("templates", template_uuid, patch)
+        except Exception as e:  # noqa: BLE001
+            # Chain already broadcast — persist at least the tx hash so retries reconcile.
+            log("publish_finalize_failed", template_id=template_uuid, tx=tx_hash, error=repr(e))
+            try:
+                await sb.update(
+                    "templates",
+                    template_uuid,
+                    build_publish_broadcast_patch(tx_hash=tx_hash, onchain_token_id=token_id),
+                )
+            except Exception as persist_err:  # noqa: BLE001
+                log(
+                    "publish_broadcast_persist_failed",
+                    template_id=template_uuid,
+                    tx=tx_hash,
+                    error=repr(persist_err),
+                )
+            raise PublishError("failed to persist publish; retry to reconcile", code="persist") from e
+
+        log("template_published", template_id=template_uuid, tx=tx_hash, creator=creator)
         return self._json(request, {"ok": True, "template": row, "tx": result})
 
     # ---- gen Worker (service binding) --------------------------------------

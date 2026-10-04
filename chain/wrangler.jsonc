@@ -8,7 +8,19 @@
     "MARKETPLACE_ADDRESS": "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
     "MONAD_RPC_URL": "https://testnet-rpc.monad.xyz",
     "MONAD_CHAIN_ID": "10143"
-  }
+  },
+  // Single RelayerDO instance serializes publishFor writes (EOA nonce safety).
+  "durable_objects": {
+    "bindings": [
+      { "name": "RELAYER", "class_name": "RelayerDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-relayer-queue",
+      "new_sqlite_classes": ["RelayerDO"]
+    }
+  ]
   // Secrets (never commit): RELAYER_PRIVATE_KEY
   // Local: chain/.dev.vars
 }

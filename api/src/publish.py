@@ -48,6 +48,69 @@ def check_rate_limit(
     return recent
 
 
+def recoverable_publish_state(template: dict | None) -> dict | None:
+    """Return prior broadcast state that must not be re-sent on retry.
+
+    If publishFor already succeeded but `is_published` was never set (e.g. the
+    subsequent Supabase update failed), retries must finalize from this state
+    instead of broadcasting a second on-chain publish.
+    """
+    if not template or template.get("is_published") is True:
+        return None
+    tx_hash = template.get("publish_tx_hash")
+    token_id = template.get("onchain_token_id")
+    has_tx = isinstance(tx_hash, str) and bool(tx_hash.strip())
+    has_token = token_id is not None and str(token_id).strip() != ""
+    if not has_tx and not has_token:
+        return None
+    out: dict[str, Any] = {}
+    if has_tx:
+        out["txHash"] = str(tx_hash).strip()
+    if has_token:
+        out["templateId"] = str(token_id).strip()
+    return out
+
+
+def build_publish_success_patch(
+    *,
+    tx_hash: str | None,
+    onchain_token_id: str | None,
+    price_wei: int | None = None,
+) -> dict:
+    """DB patch that marks a template published and records recoverable chain state."""
+    patch: dict[str, Any] = {
+        "is_published": True,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if isinstance(tx_hash, str) and tx_hash.strip():
+        patch["publish_tx_hash"] = tx_hash.strip()
+    if onchain_token_id is not None and str(onchain_token_id).strip() != "":
+        patch["onchain_token_id"] = str(onchain_token_id).strip()
+    if price_wei is not None:
+        try:
+            patch["price_mon"] = int(price_wei) / 10**18
+        except Exception:  # noqa: BLE001
+            pass
+    return patch
+
+
+def build_publish_broadcast_patch(*, tx_hash: str, onchain_token_id: str | None) -> dict:
+    """Minimal patch persisted immediately after a successful chain broadcast.
+
+    Written before (or as part of) setting is_published so a later failure still
+    leaves enough state for an idempotent retry.
+    """
+    if not isinstance(tx_hash, str) or not tx_hash.strip():
+        raise PublishError("txHash required to persist publish", code="chain")
+    patch: dict[str, Any] = {
+        "publish_tx_hash": tx_hash.strip(),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if onchain_token_id is not None and str(onchain_token_id).strip() != "":
+        patch["onchain_token_id"] = str(onchain_token_id).strip()
+    return patch
+
+
 async def send_publish_for(
     env,
     *,

@@ -19,7 +19,14 @@ from ownership import (  # noqa: E402
     validate_publish_uri,
 )
 from privy_jwt import extract_wallet_from_identity_claims  # noqa: E402
-from publish import GLOBAL_PUBLISH_LIMIT, check_rate_limit, PublishError  # noqa: E402
+from publish import (  # noqa: E402
+    GLOBAL_PUBLISH_LIMIT,
+    build_publish_broadcast_patch,
+    build_publish_success_patch,
+    check_rate_limit,
+    PublishError,
+    recoverable_publish_state,
+)
 from purchase import PurchaseError  # noqa: E402
 from purchase_resolve import onchain_id_from_template, resolve_template_for_purchase  # noqa: E402
 
@@ -150,6 +157,45 @@ def test_global_rate_limit_cap():
     with pytest.raises(PublishError) as ei:
         check_rate_limit(hist, now=now, limit=GLOBAL_PUBLISH_LIMIT, window=3600)
     assert ei.value.code == "rate_limited"
+
+
+# ---- Publish persistence / idempotency -----------------------------------
+
+
+def test_recoverable_publish_state_none_when_clean():
+    assert recoverable_publish_state(None) is None
+    assert recoverable_publish_state({"is_published": False}) is None
+    assert recoverable_publish_state({"is_published": True, "publish_tx_hash": "0xabc"}) is None
+
+
+def test_recoverable_publish_state_from_tx_hash():
+    prior = recoverable_publish_state(
+        {"is_published": False, "publish_tx_hash": "0xdead", "onchain_token_id": "9"}
+    )
+    assert prior == {"txHash": "0xdead", "templateId": "9"}
+
+
+def test_recoverable_publish_state_from_token_only():
+    prior = recoverable_publish_state({"is_published": False, "onchain_token_id": "42"})
+    assert prior == {"templateId": "42"}
+
+
+def test_build_publish_broadcast_patch_requires_tx():
+    with pytest.raises(PublishError) as ei:
+        build_publish_broadcast_patch(tx_hash="", onchain_token_id="1")
+    assert ei.value.code == "chain"
+    patch = build_publish_broadcast_patch(tx_hash="0xabc", onchain_token_id="7")
+    assert patch["publish_tx_hash"] == "0xabc"
+    assert patch["onchain_token_id"] == "7"
+    assert "is_published" not in patch
+
+
+def test_build_publish_success_patch_sets_published():
+    patch = build_publish_success_patch(tx_hash="0xabc", onchain_token_id="3", price_wei=10**18)
+    assert patch["is_published"] is True
+    assert patch["publish_tx_hash"] == "0xabc"
+    assert patch["onchain_token_id"] == "3"
+    assert patch["price_mon"] == 1.0
 
 
 # ---- Embedded wallet preference ------------------------------------------
