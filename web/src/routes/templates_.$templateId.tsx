@@ -19,6 +19,10 @@ import { Card } from '#/components/ui/card'
 import { Callout } from '#/components/callout'
 import { BuyLicenseCard } from '#/components/buy-license-card'
 import { LineageTree } from '#/components/lineage-node'
+import {
+  LockedSectionCard,
+  lockedSectionTitles,
+} from '#/components/locked-section-card'
 import { MonPrice } from '#/components/mon-price'
 import { PublishDialog, PublishedSuccess } from '#/components/publish-dialog'
 import { RichText } from '#/components/math-text'
@@ -79,7 +83,8 @@ function TemplateView() {
 
   const c = gated.content
   const preview = gated.preview
-  const g = t.generation
+  // Prefer gated generation (license → public slice; owner → full) over loader preview.
+  const g = gated.generation ?? t.generation
   const published = Boolean(t.is_published) || Boolean(onchainId)
   const [publishOpen, setPublishOpen] = useState(false)
   const [publishedOpen, setPublishedOpen] = useState(false)
@@ -101,22 +106,36 @@ function TemplateView() {
         ? String(t.price_mon)
         : null
 
-  const owned = onchain.hasLicense === true || alreadyOwned
+  const owned = onchain.hasLicense === true || alreadyOwned || gated.access === 'owner'
+  const hasLicense = owned || gated.access === 'license'
   const buying = ['checking', 'signing', 'confirming', 'verifying'].includes(buyStatus)
+  const sectionLabels = lockedSectionTitles(preview.sectionTitles)
 
-  const toc = [
-    { id: 'summary', label: 'Summary', icon: AlignLeft },
-    { id: 'objectives', label: 'Learning objectives', icon: Target },
-    { id: 'concepts', label: 'Key concepts', icon: BookOpen },
-    ...((c?.sections ?? []).map((s, i) => ({
-      id: `section-${i}`,
-      label: `${i + 1}. ${s.heading}`,
-      icon: ListTree,
-    })) ?? []),
-    { id: 'examples', label: 'Worked examples', icon: Sigma },
-    { id: 'practice', label: 'Practice', icon: CircleHelp },
-    { id: 'diagrams', label: 'Diagram', icon: Workflow },
-  ]
+  const toc = gated.isPreviewOnly
+    ? [
+        { id: 'summary', label: 'Summary', icon: AlignLeft },
+        ...(preview.learning_objectives && preview.learning_objectives.length > 0
+          ? [{ id: 'objectives', label: 'Learning objectives', icon: Target }]
+          : []),
+        ...sectionLabels.map((label, i) => ({
+          id: `locked-section-${i}`,
+          label,
+          icon: Lock,
+        })),
+      ]
+    : [
+        { id: 'summary', label: 'Summary', icon: AlignLeft },
+        { id: 'objectives', label: 'Learning objectives', icon: Target },
+        { id: 'concepts', label: 'Key concepts', icon: BookOpen },
+        ...((c?.sections ?? []).map((s, i) => ({
+          id: `section-${i}`,
+          label: `${i + 1}. ${s.heading}`,
+          icon: ListTree,
+        })) ?? []),
+        { id: 'examples', label: 'Worked examples', icon: Sigma },
+        { id: 'practice', label: 'Practice', icon: CircleHelp },
+        { id: 'diagrams', label: 'Diagram', icon: Workflow },
+      ]
 
   return (
     <main className="min-h-[70vh]" data-marketplace="template-detail">
@@ -148,13 +167,12 @@ function TemplateView() {
           <div className="mb-8 flex flex-col gap-3">
             <div className="flex flex-wrap gap-2">
               <Badge>Study template</Badge>
-              <Badge variant="outline">
-                {g?.model ? `AI-generated · ${shortModel(g.model)}` : 'AI-generated'}
-              </Badge>
+              <Badge variant="outline">AI-generated</Badge>
               {t.parent_template_id && <Badge variant="outline">Fork</Badge>}
               {published && onchainId && (
                 <Badge variant="outline">Onchain #{onchainId}</Badge>
               )}
+              {hasLicense && <Badge variant="outline">Owned</Badge>}
             </div>
             <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
               {preview.title ?? c?.title ?? t.title}
@@ -190,7 +208,7 @@ function TemplateView() {
           )}
 
           {gated.isPreviewOnly ? (
-            <PreviewBody preview={preview} />
+            <PreviewBody preview={preview} sectionLabels={sectionLabels} />
           ) : c ? (
             <FullBody
               content={c}
@@ -227,11 +245,35 @@ function TemplateView() {
                 </Button>
                 {publishError && <p className="text-sm text-destructive">{publishError}</p>}
               </Card>
+            ) : hasLicense ? (
+              <OwnedLicenseCard
+                price={priceMon}
+                onFork={() => {
+                  void navigate({
+                    to: '/fork/$templateId',
+                    params: { templateId: t.id },
+                  })
+                }}
+                meta={[
+                  { label: 'Sections', value: String(c?.sections.length ?? '—') },
+                  { label: 'Questions', value: String(c?.practice_questions.length ?? '—') },
+                  {
+                    label: 'Published',
+                    value: t.created_at
+                      ? new Date(t.created_at).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })
+                      : '—',
+                  },
+                ]}
+              />
             ) : (
               <>
                 <BuyLicenseCard
                   price={priceMon}
-                  owned={owned}
+                  owned={false}
                   isLoading={buying || onchain.loading}
                   onBuy={() => {
                     if (!onchainId || !onchain.template) return
@@ -250,8 +292,8 @@ function TemplateView() {
                     })
                   }}
                   meta={[
-                    { label: 'Sections', value: String(c?.sections.length ?? '—') },
-                    { label: 'Questions', value: String(c?.practice_questions.length ?? '—') },
+                    { label: 'Sections', value: '—' },
+                    { label: 'Questions', value: '—' },
                     {
                       label: 'Published',
                       value: t.created_at
@@ -293,9 +335,16 @@ function TemplateView() {
                     ? `${g.source_pages.start} to ${g.source_pages.end}`
                     : '—',
                 ],
-                ['Sections', String(c?.sections.length ?? '—')],
-                ['Questions', String(c?.practice_questions.length ?? '—')],
-                ['Model', g?.model ? shortModel(g.model) : '—'],
+                [
+                  'Sections',
+                  gated.isPreviewOnly
+                    ? String(sectionLabels.length)
+                    : String(c?.sections.length ?? '—'),
+                ],
+                [
+                  'Questions',
+                  gated.isPreviewOnly ? '—' : String(c?.practice_questions.length ?? '—'),
+                ],
               ].map(([a, b]) => (
                 <div key={a} className="flex justify-between text-[13px]">
                   <span className="text-muted-foreground">{a}</span>
@@ -303,15 +352,6 @@ function TemplateView() {
                 </div>
               ))}
             </Card>
-
-            {published && gated.isPreviewOnly && (
-              <div className="surface-card relative overflow-hidden p-6 opacity-60">
-                <Lock className="mx-auto mb-2 h-5 w-5" />
-                <p className="text-center text-sm font-medium">
-                  Buy a license to unlock the full template
-                </p>
-              </div>
-            )}
 
             <Link
               to="/templates"
@@ -346,10 +386,60 @@ function TemplateView() {
   )
 }
 
+function OwnedLicenseCard({
+  price,
+  onFork,
+  meta,
+}: {
+  price?: number | string | null
+  onFork?: () => void
+  meta?: { label: string; value: string }[]
+}) {
+  return (
+    <aside className="surface-card shadow-elevated flex flex-col gap-3 p-6" data-marketplace="owned-card">
+      <div className="flex items-center justify-between gap-2">
+        <MonPrice amount={price ?? '—'} size="lg" />
+        <Badge variant="outline">Owned</Badge>
+      </div>
+      <p className="text-[13px] text-muted-foreground">License unlocked · full study content</p>
+      <Button className="w-full" disabled>
+        You own this license
+      </Button>
+      <Button variant="secondary" className="w-full" onClick={onFork}>
+        Fork this template
+      </Button>
+      {meta && meta.length > 0 && (
+        <>
+          <div className="my-1 h-px w-full bg-border" />
+          <dl className="flex flex-col gap-2">
+            {meta.map((m) => (
+              <div key={m.label} className="flex justify-between text-[13px]">
+                <dt className="text-muted-foreground">{m.label}</dt>
+                <dd className="font-medium text-foreground">{m.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      )}
+    </aside>
+  )
+}
+
+/**
+ * Public preview only: summary (in hero) + optional objectives + locked section skeletons.
+ * Never receives gated body copy — placeholders only.
+ */
 function PreviewBody({
   preview,
+  sectionLabels,
 }: {
-  preview: { title?: string | null; summary?: string | null; learning_objectives?: string[] }
+  preview: {
+    title?: string | null
+    summary?: string | null
+    learning_objectives?: string[]
+    sectionTitles?: string[]
+  }
+  sectionLabels: string[]
 }) {
   return (
     <div className="flex flex-col gap-10" data-marketplace="preview">
@@ -364,6 +454,14 @@ function PreviewBody({
           ))}
         </section>
       )}
+
+      <section className="flex flex-col gap-4" data-marketplace="locked-sections">
+        {sectionLabels.map((title, i) => (
+          <div key={title} id={`locked-section-${i}`}>
+            <LockedSectionCard title={title} />
+          </div>
+        ))}
+      </section>
     </div>
   )
 }
@@ -546,11 +644,6 @@ function SectionHeading({ n, title }: { n: string; title: string }) {
       <h2 className="font-display text-[22px] font-bold tracking-tight">{title}</h2>
     </div>
   )
-}
-
-function shortModel(m: string) {
-  const parts = m.split('/')
-  return parts[parts.length - 1] ?? m
 }
 
 function Mermaid({ id, source }: { id: string; source: string }) {

@@ -233,8 +233,9 @@ def resolve_parent_onchain_id(*, template: dict, parent: dict | None) -> int:
         value = int(str(token).strip())
     except (TypeError, ValueError) as e:
         raise PublishError("parent onchain_token_id invalid", code="bad_parent", status=400) from e
-    if value < 0:
-        raise PublishError("parent onchain_token_id invalid", code="bad_parent", status=400)
+    # Onchain template ids start at 1; 0 would publish the fork as a root (lineage lost).
+    if value <= 0:
+        raise PublishError("parent template is not published on-chain", code="bad_parent", status=400)
     return value
 
 

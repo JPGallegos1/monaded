@@ -1,7 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useMemo, useState } from 'react'
 import {
-  ChevronDown,
   CircleHelp,
   FileText,
   FileUp,
@@ -36,11 +35,6 @@ export const Route = createFileRoute('/upload')({
 const STYLES = ['Concise', 'Step-by-step', 'Visual', 'Exam prep'] as const
 type LearningStyle = (typeof STYLES)[number]
 
-const MODELS = [
-  { id: 'balanced', label: 'Balanced · ~20 s' },
-  { id: 'best-math', label: 'Best math · ~40 s' },
-] as const
-
 function Upload() {
   if (!isPrivyConfigured()) {
     return (
@@ -62,7 +56,6 @@ function UploadAuthed() {
   const [startPage, setStartPage] = useState('1')
   const [endPage, setEndPage] = useState('')
   const [style, setStyle] = useState<LearningStyle>('Step-by-step')
-  const [model, setModel] = useState<(typeof MODELS)[number]['id']>('balanced')
   const [phase, setPhase] = useState<'form' | 'working'>('form')
   const [stepIndex, setStepIndex] = useState(0)
   const [statusDetail, setStatusDetail] = useState('')
@@ -112,8 +105,7 @@ function UploadAuthed() {
           : `From page ${start} of ${ex.page_count}`,
       )
       setStepIndex(2)
-      setStatusDetail(`Generating with ${model === 'best-math' ? 'best math model' : 'balanced model'}…`)
-      // learning_style is accepted by the API; model selection is UI-only until gen exposes it.
+      setStatusDetail('Generating your study template (about 20–40 s)')
       const { template } = await generateTemplate(material.id, {
         start_page: start,
         end_page: end,
@@ -279,29 +271,6 @@ function UploadAuthed() {
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[13px] font-medium">AI model</span>
-            <div className="relative">
-              <select
-                value={model}
-                disabled={!authenticated}
-                onChange={(e) => setModel(e.target.value as typeof model)}
-                className="w-full appearance-none rounded-md border border-border bg-background px-3 py-2.5 pr-10 text-sm outline-none"
-              >
-                {MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            </div>
-            <span className="text-xs text-muted-foreground">
-              Best math quality takes longer (up to ~40 s). Model picker is UI-only until the gen
-              worker exposes it.
-            </span>
           </div>
 
           {error && <p className="text-sm text-destructive">Error: {error}</p>}
