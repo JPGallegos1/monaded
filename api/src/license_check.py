@@ -16,6 +16,32 @@ HAS_LICENSE_SELECTOR = "e3b461d9"
 
 FetchFn = Callable[..., Awaitable[Any]]
 
+# Explicit allowlists — never return the whole templates row to clients.
+PUBLIC_TEMPLATE_FIELDS = (
+    "id",
+    "title",
+    "description",
+    "price_mon",
+    "royalty_bps",
+    "parent_template_id",
+    "onchain_token_id",
+    "is_published",
+    "status",
+    "publish_tx_hash",
+    "created_at",
+    "updated_at",
+)
+
+# Extra fields for owner / license holders (full content path).
+# Still excludes secrets/internal columns (publish_claimed_at, content_r2_key, etc.).
+OWNER_TEMPLATE_FIELDS = PUBLIC_TEMPLATE_FIELDS + (
+    "material_id",
+    "content_hash",
+    "error",
+    "learning_style",
+    "author_id",
+)
+
 
 def _pad_address(addr: str) -> str:
     a = addr.lower()
@@ -108,19 +134,31 @@ def build_preview_content(content: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _public_generation(gen: Any) -> dict | None:
+    if not isinstance(gen, dict):
+        return None
+    return {
+        k: gen.get(k)
+        for k in ("model", "source_pages", "truncated", "generate_ms")
+        if k in gen
+    }
+
+
 def public_template_view(row: dict, *, include_full_content: bool) -> dict:
-    """Return a template row safe for the caller (preview vs full content)."""
-    out = dict(row)
+    """Return an allowlisted template payload (never the raw DB row)."""
+    fields = OWNER_TEMPLATE_FIELDS if include_full_content else PUBLIC_TEMPLATE_FIELDS
+    out: dict[str, Any] = {k: row.get(k) for k in fields if k in row}
+
+    raw_content = row.get("content") if isinstance(row.get("content"), dict) else None
     if include_full_content:
-        return out
-    out["content"] = build_preview_content(row.get("content") if isinstance(row.get("content"), dict) else None)
-    # Hide generation internals that may echo source material
-    if "generation" in out:
-        gen = out.get("generation")
-        if isinstance(gen, dict):
-            out["generation"] = {
-                k: gen.get(k)
-                for k in ("model", "source_pages", "truncated", "generate_ms")
-                if k in gen
-            }
+        out["content"] = raw_content
+        # Owner/license: allow full generation metadata (still no R2 keys).
+        if "generation" in row and isinstance(row.get("generation"), dict):
+            out["generation"] = dict(row["generation"])
+    else:
+        out["content"] = build_preview_content(raw_content)
+        pub_gen = _public_generation(row.get("generation"))
+        if pub_gen is not None:
+            out["generation"] = pub_gen
+
     return out

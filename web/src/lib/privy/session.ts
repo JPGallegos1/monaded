@@ -50,8 +50,15 @@ export async function logoutServerSession(): Promise<void> {
 /** Auth-aware JSON fetch (sends session cookie via same-origin `/api`). */
 export async function authedJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await apiFetch(path, init)
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: string
+    code?: string
+  }
+  if (!res.ok) {
+    const msg = body.error ?? `HTTP ${res.status}`
+    // Surface machine codes (e.g. bad_parent) for UI messaging.
+    throw new Error(body.code ? `${msg} (${body.code})` : msg)
+  }
   return body as T
 }
 
@@ -73,15 +80,17 @@ export async function verifyPurchase(input: {
 
 export async function publishTemplate(
   templateId: string,
-  input: { priceWei: string | number; parentId?: number },
+  input: { priceWei: string | number },
 ) {
-  return authedJson<{ ok: boolean; tx: { txHash: string } }>(`/templates/${templateId}/publish`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      price_wei: input.priceWei,
-      parent_id: input.parentId ?? 0,
-      // uri is built server-side — never send it from the client
-    }),
-  })
+  return authedJson<{ ok: boolean; tx: { txHash: string }; code?: string }>(
+    `/templates/${templateId}/publish`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // parent_id is resolved server-side from templates.parent_template_id — never send it.
+      body: JSON.stringify({
+        price_wei: input.priceWei,
+      }),
+    },
+  )
 }

@@ -14,14 +14,27 @@ export type UsePublishTemplateResult = {
     templateId: string
     /** Price in MON (decimal string). */
     priceMon: string
-    /** Optional onchain parent id (0 = original). Prefer DB parent via fork API + PR #3. */
-    parentId?: number
   }) => Promise<PublishResult | null>
   reset: () => void
 }
 
+function formatPublishError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/bad_parent|not published on-chain/i.test(msg)) {
+    return (
+      'Cannot publish this fork: the parent template is not published on-chain yet ' +
+      '(or the parent link is missing). Fork from a published marketplace template, then retry.'
+    )
+  }
+  if (/rate_limited/i.test(msg)) {
+    return 'Publish/fork rate limit exceeded. Try again later.'
+  }
+  return msg
+}
+
 /**
- * Publish via POST /templates/{id}/publish (relayer publishFor). Shows tx hash for explorer link.
+ * Publish via POST /templates/{id}/publish (relayer publishFor).
+ * Onchain parentId comes from DB parent_template_id — never from the client.
  */
 export function usePublishTemplate(): UsePublishTemplateResult {
   const { authenticated, login } = usePrivySession()
@@ -36,7 +49,7 @@ export function usePublishTemplate(): UsePublishTemplateResult {
   }, [])
 
   const publish = useCallback(
-    async (args: { templateId: string; priceMon: string; parentId?: number }) => {
+    async (args: { templateId: string; priceMon: string }) => {
       reset()
       if (!authenticated) {
         login()
@@ -49,7 +62,6 @@ export function usePublishTemplate(): UsePublishTemplateResult {
         const priceWei = monToWei(args.priceMon)
         const res: PublishApiResult = await publishTemplateOnchain(args.templateId, {
           priceWei: priceWei.toString(),
-          parentId: args.parentId ?? 0,
         })
         const txHash = (res.tx?.txHash ?? '') as `0x${string}`
         if (!txHash.startsWith('0x')) {
@@ -66,7 +78,7 @@ export function usePublishTemplate(): UsePublishTemplateResult {
         setStatus('done')
         return out
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(formatPublishError(e))
         setStatus('error')
         return null
       }

@@ -43,6 +43,7 @@ from ownership import (
     OwnershipError,
     assert_can_publish,
     build_publish_uri,
+    resolve_publish_price_floor,
     validate_publish_price,
     validate_publish_uri,
 )
@@ -488,7 +489,6 @@ class Default(WorkerEntrypoint):
         price_wei = body.get("price_wei") or body.get("priceWei")
         if price_wei is None:
             raise HttpError(400, "price_wei is required")
-        price_wei_int = validate_publish_price(price_wei)
 
         sb = Supabase(self.env)
         tpl = await sb.get("templates", template_uuid)
@@ -502,11 +502,16 @@ class Default(WorkerEntrypoint):
         uri = validate_publish_uri(build_publish_uri(tpl))
 
         # parentId is derived from DB lineage (parent_template_id → parent's onchain_token_id).
-        # Never trust body.parent_id / parentId.
+        # Never trust body.parent_id / parentId — reject forks whose parent has no onchain id.
         parent_row = None
         if tpl.get("parent_template_id"):
             parent_row = await sb.get("templates", tpl["parent_template_id"])
         parent_id = resolve_parent_onchain_id(template=tpl, parent=parent_row)
+
+        # Price validation after parent resolve so a future parent-price floor can apply.
+        # Product decision: forks remain free-priced (floor is None) for now.
+        floor = resolve_publish_price_floor(parent=parent_row)
+        price_wei_int = validate_publish_price(price_wei, min_price_wei=floor)
 
         # Idempotent retry: prior send left a tx hash — reconcile via receipt, do not re-send.
         prior = recoverable_publish_state(tpl)
@@ -531,7 +536,12 @@ class Default(WorkerEntrypoint):
             )
             return self._json(
                 request,
-                {"ok": True, "template": row, "tx": receipt, "reconciled": True},
+                {
+                    "ok": True,
+                    "template": public_template_view(row, include_full_content=True),
+                    "tx": receipt,
+                    "reconciled": True,
+                },
             )
         if prior is not None and prior.get("templateId") and not prior.get("txHash"):
             # Token known without hash (legacy) — finalize without re-broadcast.
@@ -543,7 +553,12 @@ class Default(WorkerEntrypoint):
             row = await sb.update("templates", template_uuid, patch)
             return self._json(
                 request,
-                {"ok": True, "template": row, "tx": prior, "reconciled": True},
+                {
+                    "ok": True,
+                    "template": public_template_view(row, include_full_content=True),
+                    "tx": prior,
+                    "reconciled": True,
+                },
             )
 
         # Atomic claim before chain/: only the winner may send.
@@ -613,7 +628,14 @@ class Default(WorkerEntrypoint):
             ) from e
 
         log("template_published", template_id=template_uuid, tx=tx_hash, creator=creator)
-        return self._json(request, {"ok": True, "template": row, "tx": receipt})
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "template": public_template_view(row, include_full_content=True),
+                "tx": receipt,
+            },
+        )
 
     # ---- gen Worker (service binding) --------------------------------------
     async def _gen(self, method, path, payload=None):
@@ -882,7 +904,11 @@ class Default(WorkerEntrypoint):
         raise HttpError(403, "license or ownership required", code="forbidden")
 
     async def fork_template(self, request, template_id):
-        """Create a draft fork with parent_template_id for later publish."""
+        """Create a draft fork with parent_template_id for later publish.
+
+        Uses the same per-user + global publish rate limits (each fork inserts a
+        material + template row).
+        """
         try:
             session = await require_session(self.env, request)
         except ValueError as e:
@@ -900,6 +926,14 @@ class Default(WorkerEntrypoint):
         if not is_owner and not licensed:
             raise ForkError("license or ownership required to fork", code="forbidden", status=403)
 
+        # Parent must already be onchain so a later publish can resolve parentId from DB.
+        if parent.get("onchain_token_id") is None or str(parent.get("onchain_token_id")).strip() == "":
+            raise ForkError(
+                "parent template is not published on-chain",
+                code="bad_parent",
+                status=400,
+            )
+
         user_row = await sb.get_by("users", "privy_user_id", session["userId"])
         if not user_row:
             user_row = await sb.upsert_user(
@@ -909,13 +943,20 @@ class Default(WorkerEntrypoint):
                 user_row = user_row[0] if user_row else None
         owner_user_id = user_row["id"] if user_row else None
 
+        # Same caps as publish — forks create durable rows and feed publishFor.
+        await self._check_publish_rate_limits(session["userId"])
+
         material_row, template_row = build_fork_rows(
             parent=parent, owner_user_id=owner_user_id, title=title
         )
         await sb.insert("materials", material_row)
         row = await sb.insert("templates", template_row)
         log("template_forked", template_id=row["id"], parent_id=template_id, user=session["userId"])
-        return self._json(request, {"template": row}, 201)
+        return self._json(
+            request,
+            {"template": public_template_view(row, include_full_content=True)},
+            201,
+        )
 
 
 # Re-export DO classes at module level for Wrangler durable_objects.class_name

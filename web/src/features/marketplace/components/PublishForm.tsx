@@ -3,20 +3,21 @@ import { txExplorerUrl } from '../format'
 import { usePublishTemplate } from '../hooks/usePublishTemplate'
 
 /**
- * Thin publish form: price in MON + optional onchain parent id.
+ * Thin publish form: price in MON only.
+ * Lineage/parent is set via /fork (DB parent_template_id); the API ignores client parent_id.
  * PR #1 PublishDialog can call the same usePublishTemplate hook.
  */
 export function PublishForm({
   templateId,
   defaultPriceMon = '0.01',
-  defaultParentId = 0,
+  /** When set, show that this draft will publish as a fork of the given DB parent. */
+  parentTemplateId,
 }: {
   templateId: string
   defaultPriceMon?: string
-  defaultParentId?: number
+  parentTemplateId?: string | null
 }) {
   const [priceMon, setPriceMon] = useState(defaultPriceMon)
-  const [parentId, setParentId] = useState(String(defaultParentId || ''))
   const { status, error, result, publish } = usePublishTemplate()
 
   return (
@@ -24,11 +25,7 @@ export function PublishForm({
       data-marketplace="publish-form"
       onSubmit={(e) => {
         e.preventDefault()
-        void publish({
-          templateId,
-          priceMon,
-          parentId: parentId.trim() ? Number(parentId) : 0,
-        })
+        void publish({ templateId, priceMon })
       }}
       style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 420 }}
     >
@@ -44,21 +41,16 @@ export function PublishForm({
           required
         />
       </label>
-      <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span>Fork of (onchain parent id, optional)</span>
-        <input
-          type="number"
-          min="0"
-          step="1"
-          value={parentId}
-          onChange={(e) => setParentId(e.target.value)}
-          disabled={status === 'publishing'}
-          placeholder="0 = original"
-        />
-        <span style={{ fontSize: 12, opacity: 0.7 }}>
-          Prefer creating a fork via /fork so parent_template_id is set in the DB (PR #3).
-        </span>
-      </label>
+      {parentTemplateId ? (
+        <p style={{ margin: 0, fontSize: 13, opacity: 0.8 }}>
+          Fork of template <code>{parentTemplateId}</code>. Onchain parent id is resolved from the
+          database at publish time (client cannot override royalties).
+        </p>
+      ) : (
+        <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+          To set lineage, use Fork on a published template first — do not pass a parent id here.
+        </p>
+      )}
       <button type="submit" disabled={status === 'publishing'}>
         {status === 'publishing' ? 'Publishing…' : 'Publish on Monad'}
       </button>

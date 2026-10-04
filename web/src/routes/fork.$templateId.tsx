@@ -88,7 +88,6 @@ function ForkPage() {
                 parentTemplateId: parent.id,
                 title,
                 priceMon,
-                parentOnchainId: onchainId ?? undefined,
               }).then((res) => {
                 if (res?.template) {
                   navigate({

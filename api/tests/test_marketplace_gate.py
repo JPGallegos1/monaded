@@ -1,4 +1,4 @@
-"""Unit tests for content gating, hasLicense encoding, and fork row builders."""
+"""Unit tests for content gating, allowlists, fork builders, parent resolution hooks."""
 
 from __future__ import annotations
 
@@ -12,10 +12,24 @@ sys.path.insert(0, str(SRC))
 
 from fork import ForkError, build_fork_rows  # noqa: E402
 from license_check import (  # noqa: E402
+    OWNER_TEMPLATE_FIELDS,
+    PUBLIC_TEMPLATE_FIELDS,
     build_preview_content,
     decode_bool_result,
     encode_has_license_call,
     public_template_view,
+)
+from ownership import (  # noqa: E402
+    OwnershipError,
+    resolve_publish_price_floor,
+    validate_publish_price,
+)
+from publish import (  # noqa: E402
+    PUBLISH_LIMIT,
+    GLOBAL_PUBLISH_LIMIT,
+    PublishError,
+    check_rate_limit,
+    resolve_parent_onchain_id,
 )
 
 
@@ -57,10 +71,19 @@ def test_preview_strips_full_content():
     assert preview["worked_examples"] == []
 
 
-def test_public_template_view_gates_content():
+def test_public_template_view_allowlists_and_strips_private_fields():
     row = {
         "id": "t1",
         "title": "T",
+        "description": "d",
+        "price_mon": 0.01,
+        "is_published": True,
+        "onchain_token_id": "3",
+        "parent_template_id": "parent",
+        "publish_tx_hash": "0xabc",
+        "publish_claimed_at": "2026-10-04T00:00:00Z",
+        "content_r2_key": "secret/key",
+        "error": "generation blew up",
         "content": {
             "title": "T",
             "summary": "S",
@@ -74,10 +97,19 @@ def test_public_template_view_gates_content():
         "generation": {"model": "m", "usage": {"secret": 1}, "generate_ms": 10},
     }
     gated = public_template_view(row, include_full_content=False)
+    assert set(gated.keys()) <= set(PUBLIC_TEMPLATE_FIELDS) | {"content", "generation"}
+    assert "publish_claimed_at" not in gated
+    assert "content_r2_key" not in gated
+    assert "error" not in gated
     assert gated["content"]["sections"] == []
     assert "usage" not in gated["generation"]
+
     full = public_template_view(row, include_full_content=True)
+    assert "publish_claimed_at" not in full
+    assert "content_r2_key" not in full
     assert full["content"]["sections"]
+    assert "error" in full  # owner may see generation error
+    assert set(full.keys()) <= set(OWNER_TEMPLATE_FIELDS) | {"content", "generation"}
 
 
 def test_build_fork_rows_sets_parent():
@@ -105,3 +137,67 @@ def test_build_fork_rejects_unpublished():
             owner_user_id="u1",
         )
     assert ei.value.code == "not_published"
+
+
+def test_build_fork_rejects_parent_without_onchain_id():
+    with pytest.raises(ForkError) as ei:
+        build_fork_rows(
+            parent={"id": "p", "is_published": True, "onchain_token_id": None},
+            owner_user_id="u1",
+        )
+    assert ei.value.code == "not_onchain"
+
+
+def test_resolve_parent_rejects_unpublished_parent_for_fork_publish():
+    """Royalty bypass: publishing a fork whose parent has no onchain_token_id must fail."""
+    with pytest.raises(PublishError) as ei:
+        resolve_parent_onchain_id(
+            template={"id": "fork", "parent_template_id": "p"},
+            parent={"id": "p", "onchain_token_id": None},
+        )
+    assert ei.value.code == "bad_parent"
+    assert "not published on-chain" in ei.value.message
+
+
+def test_resolve_parent_ignores_any_client_invented_id():
+    """DB parent.onchain_token_id wins; body parent_id is not an input."""
+    assert (
+        resolve_parent_onchain_id(
+            template={"parent_template_id": "p"},
+            parent={"id": "p", "onchain_token_id": "7"},
+        )
+        == 7
+    )
+
+
+def test_fork_rate_limit_uses_same_publish_caps():
+    """Fork shares publish per-user + global caps (same check_rate_limit helpers)."""
+    hist: list[int] = []
+    now = 1_700_000_000
+    for _ in range(PUBLISH_LIMIT):
+        hist = check_rate_limit(hist, now=now, limit=PUBLISH_LIMIT, window=3600)
+        now += 1
+    with pytest.raises(PublishError) as ei:
+        check_rate_limit(hist, now=now, limit=PUBLISH_LIMIT, window=3600)
+    assert ei.value.code == "rate_limited"
+
+    ghist: list[int] = []
+    now = 1_700_000_000
+    for _ in range(GLOBAL_PUBLISH_LIMIT):
+        ghist = check_rate_limit(ghist, now=now, limit=GLOBAL_PUBLISH_LIMIT, window=3600)
+        now += 1
+    with pytest.raises(PublishError) as ei:
+        check_rate_limit(ghist, now=now, limit=GLOBAL_PUBLISH_LIMIT, window=3600)
+    assert ei.value.code == "rate_limited"
+
+
+def test_publish_price_floor_hook_free_for_forks_for_now():
+    """Product decision: no parent-price floor yet; helper is the single extension point."""
+    parent = {"id": "p", "price_mon": 1.0, "onchain_token_id": "1"}
+    assert resolve_publish_price_floor(parent=parent) is None
+    assert validate_publish_price(10**15, min_price_wei=resolve_publish_price_floor(parent=parent)) == 10**15
+
+    # Explicit floor still enforced when provided.
+    with pytest.raises(OwnershipError) as ei:
+        validate_publish_price(100, min_price_wei=1000)
+    assert ei.value.code == "bad_price"

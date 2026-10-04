@@ -15,7 +15,7 @@ export type PublishApiResult = {
 
 export async function publishTemplateOnchain(
   templateId: string,
-  input: { priceWei: string | number; parentId?: number },
+  input: { priceWei: string | number },
 ): Promise<PublishApiResult> {
   return publishTemplate(templateId, input) as Promise<PublishApiResult>
 }
@@ -36,7 +36,9 @@ export async function getGatedTemplateContent(templateId: string): Promise<{
   const res = await apiFetch(`/templates/${templateId}/content`)
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
+    const b = body as { error?: string; code?: string }
+    const msg = b.error ?? `HTTP ${res.status}`
+    throw new Error(b.code ? `${msg} (${b.code})` : msg)
   }
   return body as { template: GeneratedTemplate; access: 'owner' | 'license' }
 }
@@ -53,7 +55,17 @@ export async function forkTemplate(
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
+    const b = body as { error?: string; code?: string }
+    const msg = b.error ?? `HTTP ${res.status}`
+    if (b.code === 'bad_parent' || /not published on-chain/i.test(msg)) {
+      throw new Error(
+        'Cannot fork: parent template is not published on-chain yet. Buy/publish the parent first.',
+      )
+    }
+    if (b.code === 'rate_limited' || /rate limit/i.test(msg)) {
+      throw new Error('Fork/publish rate limit exceeded. Try again later.')
+    }
+    throw new Error(b.code ? `${msg} (${b.code})` : msg)
   }
   return body as { template: GeneratedTemplate }
 }

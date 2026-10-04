@@ -42,14 +42,39 @@ def assert_can_publish(*, template: dict | None, material: dict | None, owner_us
     return template
 
 
-def validate_publish_price(price_wei: int | str) -> int:
-    """Reject non-positive or absurd prices (relayer has limited MON)."""
+def resolve_publish_price_floor(*, parent: dict | None = None, min_price_wei: int | None = None) -> int | None:
+    """Minimum price_wei for publish, or None if unconstrained.
+
+    Product decision (hackathon): forks may be priced freely (no parent floor).
+    Keep this helper as the single place to add e.g. "fork >= parent price" later
+    by reading `parent.price_mon` / onchain price into a wei floor.
+    """
+    if min_price_wei is not None:
+        try:
+            floor = int(min_price_wei)
+        except (TypeError, ValueError) as e:
+            raise OwnershipError("min_price_wei must be an integer", code="bad_price", status=400) from e
+        if floor < 0:
+            raise OwnershipError("min_price_wei must be non-negative", code="bad_price", status=400)
+        return floor
+    # Intentionally ignore parent for now — free-priced forks.
+    _ = parent
+    return None
+
+
+def validate_publish_price(price_wei: int | str, *, min_price_wei: int | None = None) -> int:
+    """Reject non-positive or absurd prices (relayer has limited MON).
+
+    Optional `min_price_wei` is the single extension point for a parent-price floor.
+    """
     try:
         value = int(price_wei)
     except (TypeError, ValueError) as e:
         raise OwnershipError("price_wei must be an integer", code="bad_price", status=400) from e
     if value <= 0:
         raise OwnershipError("price_wei must be positive", code="bad_price", status=400)
+    if min_price_wei is not None and value < int(min_price_wei):
+        raise OwnershipError("price_wei below minimum", code="bad_price", status=400)
     # Hard cap: 100 MON (testnet relayer safety)
     max_wei = 100 * 10**18
     if value > max_wei:

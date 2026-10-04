@@ -100,7 +100,13 @@ function TemplateView() {
               <p style={{ fontSize: 13, opacity: 0.8, marginTop: 0 }}>
                 Relayer mints your license NFT via publishFor. Creator = your session wallet.
               </p>
-              <PublishForm templateId={t.id} defaultPriceMon="0.01" />
+              <PublishForm
+                templateId={t.id}
+                defaultPriceMon="0.01"
+                parentTemplateId={
+                  typeof t.parent_template_id === 'string' ? t.parent_template_id : null
+                }
+              />
             </section>
           )}
         </aside>

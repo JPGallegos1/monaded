@@ -12,8 +12,8 @@ import type { PublishResult } from '../types'
 export type ForkStatus = 'idle' | 'creating' | 'publishing' | 'done' | 'error'
 
 /**
- * Fork = create DB copy with parent_template_id, then publish (relayer sets onchain parent).
- * Aligns with PR #3 deriving parentId from DB lineage.
+ * Fork = create DB copy with parent_template_id, then publish.
+ * Onchain parentId is derived server-side from that DB link (client cannot bypass royalties).
  */
 export function useForkTemplate() {
   const { authenticated, login } = usePrivySession()
@@ -54,13 +54,7 @@ export function useForkTemplate() {
   )
 
   const createAndPublish = useCallback(
-    async (args: {
-      parentTemplateId: string
-      title?: string
-      priceMon: string
-      /** Onchain parent id — required on main today; PR #3 will derive it from DB instead. */
-      parentOnchainId?: number | string
-    }) => {
+    async (args: { parentTemplateId: string; title?: string; priceMon: string }) => {
       reset()
       if (!authenticated) {
         login()
@@ -74,14 +68,9 @@ export function useForkTemplate() {
         setForked(template)
         setStatus('publishing')
         const priceWei = monToWei(args.priceMon)
-        const parentId =
-          args.parentOnchainId != null && String(args.parentOnchainId).trim() !== ''
-            ? Number(args.parentOnchainId)
-            : 0
-        // Also sets parent_template_id in DB via fork; PR #3 will prefer DB over body.
+        // No parentId in the body — API resolves from template.parent_template_id.
         const res: PublishApiResult = await publishTemplateOnchain(template.id, {
           priceWei: priceWei.toString(),
-          parentId,
         })
         const txHash = (res.tx?.txHash ?? '') as `0x${string}`
         if (!txHash.startsWith('0x')) {
