@@ -1,14 +1,16 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
-import { GitFork, Pencil, Rocket } from 'lucide-react'
+import { GitFork, Rocket } from 'lucide-react'
 import { Callout } from '#/components/callout'
 import { LineageTree } from '#/components/lineage-node'
 import { PublishDialog, PublishedSuccess } from '#/components/publish-dialog'
+import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
 import { Card } from '#/components/ui/card'
 import { Input } from '#/components/ui/input'
 import {
   lineageToNodeData,
+  shortAddress,
   txExplorerUrl,
   useForkTemplate,
   useLineage,
@@ -33,8 +35,7 @@ export const Route = createFileRoute('/fork/$templateId')({
 })
 
 /**
- * Screen 08 — Fork & republish.
- * UI from PR #1; createAndPublish from marketplace hooks (#4).
+ * Screen 08 v0.2 — light fork: editable title/summary, inherited body, publish rail.
  */
 function ForkPage() {
   const parent = Route.useLoaderData() as GeneratedTemplate
@@ -42,6 +43,7 @@ function ForkPage() {
   const { authenticated, login } = usePrivySession()
   const c = parent.content
   const [title, setTitle] = useState(c?.title ? `${c.title} (fork)` : `${parent.title} (fork)`)
+  const [summary, setSummary] = useState(c?.summary ?? parent.description ?? '')
   const [price, setPrice] = useState(parent.price_mon != null ? String(parent.price_mon) : '0.01')
   const [publishOpen, setPublishOpen] = useState(false)
   const [successOpen, setSuccessOpen] = useState(false)
@@ -52,30 +54,38 @@ function ForkPage() {
   const { lineage } = useLineage(onchainId)
   const { status, error, forked, publishResult, createAndPublish } = useForkTemplate()
 
+  const creatorLabel =
+    onchain.template?.creator
+      ? shortAddress(onchain.template.creator)
+      : parent.author_id
+        ? shortId(parent.author_id)
+        : 'unknown creator'
+
   const lineageNodes = lineage
     ? lineageToNodeData(lineage)
     : [
         {
-          name: 'Upstream creator(s)',
-          role: 'Original / prior forks · 10% each',
+          name: creatorLabel,
+          role: 'Original · Level 0',
           earn: '10%',
           earnMuted: true,
         },
         {
           name: 'You',
-          role: 'Fork (new)',
+          role: 'Fork · Level 1 (new)',
           earn: 'remainder',
           highlight: true,
         },
       ]
 
   const busy = status === 'creating' || status === 'publishing'
+  const parentTitle = c?.title ?? parent.title
 
   return (
     <main data-marketplace="fork">
       <div className="flex items-center gap-2.5 bg-accent px-6 py-3 text-sm font-medium text-accent-foreground lg:px-10">
         <GitFork className="h-4 w-4 shrink-0" />
-        You&apos;re forking “{c?.title ?? parent.title}”. Set a price, then republish.
+        You&apos;re forking “{parentTitle}” by {creatorLabel}.
       </div>
 
       <div className="page-wrap page-body">
@@ -90,39 +100,60 @@ function ForkPage() {
               />
             </div>
 
-            {c?.summary && (
-              <Card className="border-primary p-5">
-                <div className="mb-3 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono text-[13px] font-semibold text-primary">01</span>
-                    <h2 className="font-display text-[22px] font-bold">Summary</h2>
-                  </div>
-                  <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary">
-                    <Pencil className="h-3.5 w-3.5" />
-                    From original
-                  </span>
-                </div>
-                <p className="text-[15px] leading-relaxed">{c.summary}</p>
-              </Card>
-            )}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[13px] font-medium">Summary</label>
+              <textarea
+                value={summary}
+                onChange={(e) => setSummary(e.target.value)}
+                rows={4}
+                className="w-full rounded-md border-[1.5px] border-primary bg-transparent px-3 py-3 text-sm leading-relaxed outline-none"
+              />
+            </div>
 
             {c?.definitions?.[0] && (
-              <Card className="p-5">
-                <div className="mb-3 flex items-center justify-between">
+              <Card className="p-5 opacity-[0.85]">
+                <div className="mb-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <span className="font-mono text-[13px] font-semibold text-primary">02</span>
                     <h2 className="font-display text-[22px] font-bold">Key concepts</h2>
                   </div>
-                  <span className="text-xs font-medium text-muted-foreground">From original</span>
+                  <Badge variant="outline">Inherited from the original</Badge>
                 </div>
                 <Callout term={c.definitions[0].term} body={c.definitions[0].definition} />
               </Card>
             )}
 
-            <p className="text-sm text-muted-foreground">
-              Fork content is copied from the parent when you publish. Section editing and AI
-              regenerate are not available yet.
-            </p>
+            {c?.worked_examples?.[0] && (
+              <Card className="flex flex-col gap-3 p-5 opacity-[0.85]">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono text-[13px] font-semibold text-primary">03</span>
+                    <h2 className="font-display text-[22px] font-bold">Worked examples</h2>
+                  </div>
+                  <Badge variant="outline">Inherited from the original</Badge>
+                </div>
+                <p className="text-sm font-medium">{c.worked_examples[0].title}</p>
+                <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                  {c.worked_examples[0].problem}
+                </p>
+              </Card>
+            )}
+
+            {c?.sections?.[0] && !c.definitions?.[0] && !c.worked_examples?.[0] && (
+              <Card className="p-5 opacity-[0.85]">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono text-[13px] font-semibold text-primary">02</span>
+                    <h2 className="font-display text-[22px] font-bold">{c.sections[0].heading}</h2>
+                  </div>
+                  <Badge variant="outline">Inherited from the original</Badge>
+                </div>
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  {c.sections[0].explanation}
+                </p>
+              </Card>
+            )}
+
             {error && <p className="text-sm text-destructive">{error}</p>}
             {forked && !publishResult && (
               <p className="text-sm">
@@ -136,16 +167,8 @@ function ForkPage() {
 
           <div className="flex flex-col gap-4">
             <Card className="flex flex-col gap-3.5 p-5">
-              <h3 className="text-base font-semibold">Who earns after you publish</h3>
-              <p className="text-xs text-muted-foreground">
-                Parent onchain id: {onchainId ?? '—'}
-                {onchain.template && <> · creator {onchain.template.creator}</>}
-              </p>
+              <h3 className="text-base font-semibold">Who earns</h3>
               <LineageTree nodes={lineageNodes} />
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                Upstream creators are paid automatically on every sale of your fork. Exact split
-                depends on lineage depth (max 3 levels).
-              </p>
             </Card>
 
             <Card className="flex flex-col gap-3.5 p-5">
@@ -158,13 +181,13 @@ function ForkPage() {
               {!authenticated ? (
                 <Button onClick={() => login()}>Sign in to fork</Button>
               ) : (
-                <Button onClick={() => setPublishOpen(true)} disabled={busy}>
+                <Button className="w-full" onClick={() => setPublishOpen(true)} disabled={busy}>
                   <Rocket className="h-4 w-4" />
                   {busy
                     ? status === 'creating'
                       ? 'Creating fork…'
                       : 'Publishing…'
-                    : 'Republish on Monad'}
+                    : 'Publish fork'}
                 </Button>
               )}
               {publishResult && (
@@ -193,7 +216,7 @@ function ForkPage() {
         open={publishOpen}
         title={title}
         defaultPrice={price}
-        parentOptions={[{ id: parent.id, label: c?.title ?? parent.title }]}
+        parentOptions={[{ id: parent.id, label: parentTitle }]}
         isLoading={busy}
         onClose={() => setPublishOpen(false)}
         onPublish={({ priceMon }) => {
@@ -225,4 +248,8 @@ function ForkPage() {
       />
     </main>
   )
+}
+
+function shortId(id: string) {
+  return id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id
 }

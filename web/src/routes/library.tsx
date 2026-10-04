@@ -16,11 +16,10 @@ export const Route = createFileRoute('/library')({
   head: () => ({ meta: [{ title: 'Library · Monaded' }] }),
 })
 
-type Tab = 'owned' | 'created' | 'forked'
+type Tab = 'owned' | 'created'
 
 /**
- * Screen 10 — Library.
- * Owned licenses come from onchain hasLicense via useLibraryLicenses (#4).
+ * Screen 10 v0.2 — Owned / Created. No progress bar; purchase date only if the API provides it.
  */
 function LibraryPage() {
   if (!isPrivyConfigured()) {
@@ -43,27 +42,20 @@ function LibraryAuthed() {
   const { loading, error, owned } = useLibraryLicenses(authenticated ? walletAddress : null)
   const [tab, setTab] = useState<Tab>('owned')
   const [created, setCreated] = useState<Template[] | null>(null)
-  const [forked, setForked] = useState<Template[] | null>(null)
 
   useEffect(() => {
     if (!authenticated || !session?.userId) {
       setCreated([])
-      setForked([])
       return
     }
     let cancelled = false
     getTemplates()
       .then((rows) => {
         if (cancelled) return
-        const mine = rows.filter((t) => t.author_id === session.userId)
-        setCreated(mine)
-        setForked(mine.filter((t) => t.parent_template_id != null && t.parent_template_id !== ''))
+        setCreated(rows.filter((t) => t.author_id === session.userId))
       })
       .catch(() => {
-        if (!cancelled) {
-          setCreated([])
-          setForked([])
-        }
+        if (!cancelled) setCreated([])
       })
     return () => {
       cancelled = true
@@ -86,9 +78,6 @@ function LibraryAuthed() {
           </Chip>
           <Chip active={tab === 'created'} onClick={() => setTab('created')}>
             Created
-          </Chip>
-          <Chip active={tab === 'forked'} onClick={() => setTab('forked')}>
-            Forked
           </Chip>
         </div>
       </div>
@@ -125,7 +114,7 @@ function LibraryAuthed() {
               {owned.length > 0 && (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   {owned.map((t) => (
-                    <LibraryCard key={t.id} template={t} subtitle={`License #${String(t.onchain_token_id)}`} />
+                    <LibraryCard key={t.id} template={t} owned />
                   ))}
                 </div>
               )}
@@ -148,42 +137,7 @@ function LibraryAuthed() {
               {created && created.length > 0 && (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   {created.map((t) => (
-                    <LibraryCard
-                      key={t.id}
-                      template={t}
-                      subtitle={
-                        t.price_mon != null ? `${t.price_mon} MON` : 'Draft / unpublished'
-                      }
-                    />
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === 'forked' && (
-            <>
-              {forked === null && <p className="text-sm text-muted-foreground">Loading…</p>}
-              {forked && forked.length === 0 && (
-                <EmptyState
-                  title="No forks yet"
-                  description="Fork a marketplace template to remix it and republish with royalties."
-                  actionLabel="Browse templates"
-                  onAction={() => {
-                    void navigate({ to: '/templates' })
-                  }}
-                />
-              )}
-              {forked && forked.length > 0 && (
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                  {forked.map((t) => (
-                    <LibraryCard
-                      key={t.id}
-                      template={t}
-                      subtitle={
-                        t.price_mon != null ? `${t.price_mon} MON · fork` : 'Draft fork'
-                      }
-                    />
+                    <LibraryCard key={t.id} template={t} />
                   ))}
                 </div>
               )}
@@ -197,18 +151,27 @@ function LibraryAuthed() {
 
 function LibraryCard({
   template: t,
-  subtitle,
+  owned,
 }: {
   template: Template
-  subtitle: string
+  owned?: boolean
 }) {
+  const creator = t.author_id ? shortId(t.author_id) : null
+  const purchaseDate = purchaseDateLabel(t)
+
   return (
     <article className="surface-card overflow-hidden">
       <div className={`h-[100px] w-full ${coverGradientClass(t.id)}`} />
       <div className="flex flex-col gap-2.5 p-4">
-        <Badge>Study</Badge>
+        <div className="flex flex-wrap gap-1.5">
+          <Badge>Study</Badge>
+          {owned && <Badge variant="outline">Owned</Badge>}
+        </div>
         <h3 className="text-base font-semibold">{t.title}</h3>
-        <p className="text-[13px] text-muted-foreground">{subtitle}</p>
+        {creator && <p className="text-[13px] text-muted-foreground">by {creator}</p>}
+        {purchaseDate && (
+          <p className="text-xs text-muted-foreground">Purchased {purchaseDate}</p>
+        )}
         <Link to="/templates/$templateId" params={{ templateId: t.id }} className="no-underline">
           <Button variant="secondary" className="w-full">
             Open template
@@ -217,4 +180,21 @@ function LibraryCard({
       </div>
     </article>
   )
+}
+
+function shortId(id: string) {
+  return id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id
+}
+
+/** Show purchase date only when the API actually returns one (never invent). */
+function purchaseDateLabel(t: Template): string | null {
+  const raw =
+    (typeof t.purchased_at === 'string' && t.purchased_at) ||
+    (typeof t.verified_at === 'string' && t.verified_at) ||
+    (typeof t.purchase_date === 'string' && t.purchase_date) ||
+    null
+  if (!raw) return null
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }

@@ -2,7 +2,7 @@
  * Privy provider wired to wagmi on Monad testnet.
  * Isolated module — UI agents should wrap the app with <PrivyAppProvider> only.
  */
-import { type ReactNode, useMemo } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import { PrivyProvider } from '@privy-io/react-auth'
 import { WagmiProvider, createConfig } from '@privy-io/wagmi'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -33,8 +33,52 @@ function buildWagmiConfig() {
   })
 }
 
+function useAppTheme(): 'light' | 'dark' {
+  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+
+  useEffect(() => {
+    const read = () => {
+      setTheme(document.documentElement.classList.contains('dark') ? 'dark' : 'light')
+    }
+    read()
+    const obs = new MutationObserver(read)
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => obs.disconnect()
+  }, [])
+
+  return theme
+}
+
+function MonadedLogo() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <span
+        aria-hidden
+        style={{
+          width: 28,
+          height: 28,
+          borderRadius: 999,
+          background: 'conic-gradient(from 180deg, #6e54ff, #b7a8ff, #6e54ff)',
+          display: 'inline-block',
+        }}
+      />
+      <span
+        style={{
+          fontFamily: '"Space Grotesk", system-ui, sans-serif',
+          fontWeight: 700,
+          fontSize: 18,
+          letterSpacing: '-0.02em',
+        }}
+      >
+        Monaded
+      </span>
+    </div>
+  )
+}
+
 export function PrivyAppProvider({ children }: { children: ReactNode }) {
   const wagmiConfig = useMemo(() => buildWagmiConfig(), [])
+  const theme = useAppTheme()
 
   if (!isPrivyConfigured()) {
     // Allow the app to boot before Juan creates the Privy App ID.
@@ -45,9 +89,13 @@ export function PrivyAppProvider({ children }: { children: ReactNode }) {
     <PrivyProvider
       appId={PRIVY_APP_ID}
       config={{
-        // Email is the primary hackathon path; Google/X show when enabled in the Privy dashboard.
         loginMethods: ['email', 'google', 'twitter'],
-        appearance: { walletChainType: 'ethereum-only' },
+        appearance: {
+          walletChainType: 'ethereum-only',
+          theme,
+          accentColor: '#6E54FF',
+          logo: <MonadedLogo />,
+        },
         embeddedWallets: {
           ethereum: {
             createOnLogin: 'users-without-wallets',
