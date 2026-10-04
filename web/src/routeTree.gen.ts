@@ -10,13 +10,20 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as LibraryRouteImport } from './routes/library'
 import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as UploadRouteImport } from './routes/upload'
+import { Route as ForkTemplateIdRouteImport } from './routes/fork.$templateId'
 import { Route as TemplatesTemplateIdRouteImport } from './routes/templates_.$templateId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LibraryRoute = LibraryRouteImport.update({
+  id: '/library',
+  path: '/library',
   getParentRoute: () => rootRouteImport,
 } as any)
 const TemplatesRoute = TemplatesRouteImport.update({
@@ -29,6 +36,11 @@ const UploadRoute = UploadRouteImport.update({
   path: '/upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ForkTemplateIdRoute = ForkTemplateIdRouteImport.update({
+  id: '/fork/$templateId',
+  path: '/fork/$templateId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TemplatesTemplateIdRoute = TemplatesTemplateIdRouteImport.update({
   id: '/templates_/$templateId',
   path: '/templates/$templateId',
@@ -37,35 +49,62 @@ const TemplatesTemplateIdRoute = TemplatesTemplateIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/library': typeof LibraryRoute
   '/templates': typeof TemplatesRoute
   '/upload': typeof UploadRoute
+  '/fork/$templateId': typeof ForkTemplateIdRoute
   '/templates/$templateId': typeof TemplatesTemplateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/library': typeof LibraryRoute
   '/templates': typeof TemplatesRoute
   '/upload': typeof UploadRoute
+  '/fork/$templateId': typeof ForkTemplateIdRoute
   '/templates/$templateId': typeof TemplatesTemplateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/library': typeof LibraryRoute
   '/templates': typeof TemplatesRoute
   '/upload': typeof UploadRoute
+  '/fork/$templateId': typeof ForkTemplateIdRoute
   '/templates_/$templateId': typeof TemplatesTemplateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/templates' | '/upload' | '/templates/$templateId'
+  fullPaths:
+    | '/'
+    | '/library'
+    | '/templates'
+    | '/upload'
+    | '/fork/$templateId'
+    | '/templates/$templateId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/templates' | '/upload' | '/templates/$templateId'
-  id: '__root__' | '/' | '/templates' | '/upload' | '/templates_/$templateId'
+  to:
+    | '/'
+    | '/library'
+    | '/templates'
+    | '/upload'
+    | '/fork/$templateId'
+    | '/templates/$templateId'
+  id:
+    | '__root__'
+    | '/'
+    | '/library'
+    | '/templates'
+    | '/upload'
+    | '/fork/$templateId'
+    | '/templates_/$templateId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LibraryRoute: typeof LibraryRoute
   TemplatesRoute: typeof TemplatesRoute
   UploadRoute: typeof UploadRoute
+  ForkTemplateIdRoute: typeof ForkTemplateIdRoute
   TemplatesTemplateIdRoute: typeof TemplatesTemplateIdRoute
 }
 
@@ -76,6 +115,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/library': {
+      id: '/library'
+      path: '/library'
+      fullPath: '/library'
+      preLoaderRoute: typeof LibraryRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/templates': {
@@ -92,6 +138,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UploadRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/fork/$templateId': {
+      id: '/fork/$templateId'
+      path: '/fork/$templateId'
+      fullPath: '/fork/$templateId'
+      preLoaderRoute: typeof ForkTemplateIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/templates_/$templateId': {
       id: '/templates_/$templateId'
       path: '/templates/$templateId'
@@ -104,8 +157,10 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LibraryRoute: LibraryRoute,
   TemplatesRoute: TemplatesRoute,
   UploadRoute: UploadRoute,
+  ForkTemplateIdRoute: ForkTemplateIdRoute,
   TemplatesTemplateIdRoute: TemplatesTemplateIdRoute,
 }
 export const routeTree = rootRouteImport
