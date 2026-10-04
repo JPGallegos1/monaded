@@ -21,11 +21,22 @@ from ownership import (  # noqa: E402
 from privy_jwt import extract_wallet_from_identity_claims  # noqa: E402
 from publish import (  # noqa: E402
     GLOBAL_PUBLISH_LIMIT,
+    GLOBAL_PUBLISH_WINDOW_SECONDS,
+    PUBLISH_CLAIM_TTL_SECONDS,
+    PUBLISH_LIMIT,
+    PUBLISH_WINDOW_SECONDS,
     build_publish_broadcast_patch,
+    build_publish_claim_patch,
+    build_publish_claim_release_patch,
     build_publish_success_patch,
     check_rate_limit,
+    claim_stale_before_iso,
+    is_claim_active,
+    publish_claim_filter,
     PublishError,
     recoverable_publish_state,
+    resolve_parent_onchain_id,
+    resolve_rate_limit_params,
 )
 from purchase import PurchaseError  # noqa: E402
 from purchase_resolve import onchain_id_from_template, resolve_template_for_purchase  # noqa: E402
@@ -196,6 +207,231 @@ def test_build_publish_success_patch_sets_published():
     assert patch["publish_tx_hash"] == "0xabc"
     assert patch["onchain_token_id"] == "3"
     assert patch["price_mon"] == 1.0
+    assert patch["publish_claimed_at"] is None
+
+
+# ---- Atomic publish claim -------------------------------------------------
+
+
+def test_publish_claim_filter_requires_unpublished_and_free_or_stale():
+    filt = publish_claim_filter("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", now=1_700_000_180, ttl_seconds=180)
+    assert "id=eq.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in filt
+    assert "is_published=eq.false" in filt
+    assert "publish_claimed_at.is.null" in filt
+    stale = claim_stale_before_iso(now=1_700_000_180, ttl_seconds=180)
+    assert stale in filt
+    assert "or=(" in filt
+
+
+def test_claim_patch_and_release():
+    claim = build_publish_claim_patch(now=1_700_000_000)
+    assert claim["publish_claimed_at"] == "2023-11-14T22:13:20Z"
+    release = build_publish_claim_release_patch(now=1_700_000_100)
+    assert release["publish_claimed_at"] is None
+
+
+def test_is_claim_active_and_stale_reclaim():
+    now = 1_700_000_180
+    # 60s ago < 180s TTL → still active
+    assert (
+        is_claim_active(
+            {"publish_claimed_at": claim_stale_before_iso(now=now, ttl_seconds=60)},
+            now=now,
+            ttl_seconds=PUBLISH_CLAIM_TTL_SECONDS,
+        )
+        is True
+    )
+    # age == TTL → not active (reclaimable)
+    assert (
+        is_claim_active(
+            {
+                "publish_claimed_at": claim_stale_before_iso(
+                    now=now, ttl_seconds=PUBLISH_CLAIM_TTL_SECONDS
+                )
+            },
+            now=now,
+            ttl_seconds=PUBLISH_CLAIM_TTL_SECONDS,
+        )
+        is False
+    )
+    assert is_claim_active({"publish_claimed_at": None}, now=now) is False
+    assert is_claim_active({}, now=now) is False
+
+
+class FakeClaimSB:
+    """Minimal Supabase stand-in for atomic claim tests."""
+
+    def __init__(self, row):
+        self.row = dict(row)
+        self.updates = []
+
+    async def update_where(self, table, query, patch):
+        assert table == "templates"
+        self.updates.append((query, dict(patch)))
+        # Simulate PostgREST: only apply if filters would match current row.
+        if self.row.get("is_published") is True:
+            return None
+        claimed = self.row.get("publish_claimed_at")
+        # Parse whether filter allows claim: null or stale.
+        if claimed and "publish_claimed_at.is.null" in query:
+            # Extract stale threshold from query ...publish_claimed_at.lt.STALE
+            import re
+
+            m = re.search(r"publish_claimed_at\.lt\.([^)&]+)", query)
+            stale = m.group(1) if m else ""
+            if claimed >= stale:  # lexicographic ISO compare works for Z timestamps
+                return None
+        self.row.update(patch)
+        return dict(self.row)
+
+
+def test_claim_template_winner_and_loser():
+    from publish import claim_template_for_publish
+
+    sb = FakeClaimSB({"id": "t1", "is_published": False, "publish_claimed_at": None})
+    won = run(claim_template_for_publish(sb, "t1", now=1_700_000_000))
+    assert won["publish_claimed_at"] == "2023-11-14T22:13:20Z"
+
+    with pytest.raises(PublishError) as ei:
+        run(claim_template_for_publish(sb, "t1", now=1_700_000_010))
+    assert ei.value.code == "publishing_in_progress"
+    assert ei.value.status == 409
+
+
+def test_stale_claim_can_be_reclaimed():
+    from publish import claim_template_for_publish
+
+    # Claim set far in the past relative to now.
+    sb = FakeClaimSB(
+        {
+            "id": "t1",
+            "is_published": False,
+            "publish_claimed_at": "2023-11-14T22:00:00Z",
+        }
+    )
+    won = run(claim_template_for_publish(sb, "t1", now=1_700_000_000))  # 22:13:20Z
+    assert won["publish_claimed_at"] == "2023-11-14T22:13:20Z"
+
+
+# ---- parent_id from DB ---------------------------------------------------
+
+
+def test_resolve_parent_id_root_when_no_parent():
+    assert resolve_parent_onchain_id(template={"id": "t1"}, parent=None) == 0
+    assert resolve_parent_onchain_id(template={"id": "t1", "parent_template_id": None}, parent=None) == 0
+
+
+def test_resolve_parent_id_from_parent_onchain_token():
+    tpl = {"id": "fork", "parent_template_id": "parent-uuid"}
+    parent = {"id": "parent-uuid", "onchain_token_id": "42", "is_published": True}
+    assert resolve_parent_onchain_id(template=tpl, parent=parent) == 42
+
+
+def test_resolve_parent_id_rejects_missing_parent_row():
+    with pytest.raises(PublishError) as ei:
+        resolve_parent_onchain_id(template={"parent_template_id": "missing"}, parent=None)
+    assert ei.value.code == "bad_parent"
+
+
+def test_resolve_parent_id_rejects_unpublished_parent():
+    with pytest.raises(PublishError) as ei:
+        resolve_parent_onchain_id(
+            template={"parent_template_id": "p"},
+            parent={"id": "p", "onchain_token_id": None},
+        )
+    assert ei.value.code == "bad_parent"
+
+
+def test_resolve_parent_id_ignores_invented_body_lineage():
+    """Body parent_id is never an input to resolve_parent_onchain_id — DB wins."""
+    tpl = {"id": "fork", "parent_template_id": "parent-uuid"}
+    parent = {"id": "parent-uuid", "onchain_token_id": "7"}
+    # Even if a client wanted parent 999, derivation yields 7.
+    assert resolve_parent_onchain_id(template=tpl, parent=parent) == 7
+    assert resolve_parent_onchain_id(template=tpl, parent=parent) != 999
+
+
+# ---- Rate-limit DO hardcodes limit/window --------------------------------
+
+
+def test_rate_limit_do_ignores_body_limit_and_window():
+    scope, limit, window = resolve_rate_limit_params(
+        {"scope": "user", "limit": 1_000_000, "window": 1}
+    )
+    assert scope == "user"
+    assert limit == PUBLISH_LIMIT
+    assert window == PUBLISH_WINDOW_SECONDS
+
+    scope, limit, window = resolve_rate_limit_params(
+        {"scope": "global", "limit": 1, "window": 1}
+    )
+    assert scope == "global"
+    assert limit == GLOBAL_PUBLISH_LIMIT
+    assert window == GLOBAL_PUBLISH_WINDOW_SECONDS
+
+
+def test_rate_limit_do_defaults_scope_user():
+    scope, limit, window = resolve_rate_limit_params({})
+    assert scope == "user"
+    assert limit == PUBLISH_LIMIT
+
+
+# ---- Early tx-hash persist / reconcile -----------------------------------
+
+
+def test_broadcast_patch_persists_hash_without_published_flag():
+    patch = build_publish_broadcast_patch(tx_hash="0xsent")
+    assert patch["publish_tx_hash"] == "0xsent"
+    assert "is_published" not in patch
+    assert "onchain_token_id" not in patch
+
+
+def test_recoverable_state_prefers_tx_hash_for_receipt_reconcile():
+    prior = recoverable_publish_state(
+        {"is_published": False, "publish_tx_hash": "0xabc", "onchain_token_id": None}
+    )
+    assert prior == {"txHash": "0xabc"}
+    # Presence of hash means retry must NOT call send again.
+
+
+def test_send_then_receipt_helpers_do_not_rebroadcast_on_reconcile():
+    """Simulate: hash persisted after send; retry uses fetch_receipt only."""
+    from publish import fetch_publish_receipt, send_publish_for
+
+    sent_calls: list[dict] = []
+    receipt_calls: list[dict] = []
+
+    async def fake_send(**kwargs):
+        sent_calls.append(kwargs)
+        return {"txHash": "0xdeadbeef"}
+
+    async def fake_receipt(**kwargs):
+        receipt_calls.append(kwargs)
+        return {"txHash": kwargs["txHash"], "templateId": "99"}
+
+    sent = run(
+        send_publish_for(
+            None,
+            creator="0x1111111111111111111111111111111111111111",
+            price_wei=10**18,
+            parent_id=0,
+            uri="ipfs://edtech-monad/x",
+            send_tx=fake_send,
+        )
+    )
+    assert sent["txHash"] == "0xdeadbeef"
+    assert len(sent_calls) == 1
+
+    # Persist would happen here in entry.py via build_publish_broadcast_patch.
+    patch = build_publish_broadcast_patch(tx_hash=sent["txHash"])
+    prior = recoverable_publish_state({"is_published": False, **patch})
+    assert prior["txHash"] == "0xdeadbeef"
+
+    # Retry path: receipt only — no second send.
+    receipt = run(fetch_publish_receipt(None, tx_hash=prior["txHash"], fetch_receipt=fake_receipt))
+    assert receipt["templateId"] == "99"
+    assert len(sent_calls) == 1
+    assert len(receipt_calls) == 1
 
 
 # ---- Embedded wallet preference ------------------------------------------

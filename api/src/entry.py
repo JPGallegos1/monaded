@@ -45,7 +45,11 @@ from publish import (
     PublishError,
     build_publish_broadcast_patch,
     build_publish_success_patch,
+    claim_template_for_publish,
+    fetch_publish_receipt,
     recoverable_publish_state,
+    release_publish_claim,
+    resolve_parent_onchain_id,
     send_publish_for,
 )
 from purchase import PurchaseError, verify_purchase_tx
@@ -202,9 +206,18 @@ class Default(WorkerEntrypoint):
         except OwnershipError as e:
             return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except PublishError as e:
-            status = 429 if e.code == "rate_limited" else 400
-            if e.code in ("config", "chain"):
+            if e.status is not None:
+                status = e.status
+            elif e.code == "rate_limited":
+                status = 429
+            elif e.code == "publishing_in_progress":
+                status = 409
+            elif e.code in ("config", "chain", "reverted", "persist"):
                 status = 503 if e.code == "config" else 502
+            elif e.code == "pending":
+                status = 409
+            else:
+                status = 400
             return self._json(request, {"error": e.message, "code": e.code}, status)
         except SupabaseNotConfigured:
             return self._json(request, {"error": "supabase not configured"}, 503)
@@ -453,10 +466,9 @@ class Default(WorkerEntrypoint):
 
         # Validate request before charging rate limits (invalid input must not consume caps).
         body = await self._json_body(request)
-        # Creator ALWAYS from session — ignore any body.creator / wallet / uri fields.
+        # Creator ALWAYS from session — ignore any body.creator / wallet / uri / parent_id.
         creator = session["walletAddress"]
         price_wei = body.get("price_wei") or body.get("priceWei")
-        parent_id = body.get("parent_id") or body.get("parentId") or 0
         if price_wei is None:
             raise HttpError(400, "price_wei is required")
         price_wei_int = validate_publish_price(price_wei)
@@ -472,12 +484,25 @@ class Default(WorkerEntrypoint):
 
         uri = validate_publish_uri(build_publish_uri(tpl))
 
-        # Idempotent retry: prior broadcast left recoverable state — finalize only.
+        # parentId is derived from DB lineage (parent_template_id → parent's onchain_token_id).
+        # Never trust body.parent_id / parentId.
+        parent_row = None
+        if tpl.get("parent_template_id"):
+            parent_row = await sb.get("templates", tpl["parent_template_id"])
+        parent_id = resolve_parent_onchain_id(template=tpl, parent=parent_row)
+
+        # Idempotent retry: prior send left a tx hash — reconcile via receipt, do not re-send.
         prior = recoverable_publish_state(tpl)
-        if prior is not None:
+        if prior is not None and prior.get("txHash"):
+            receipt = await fetch_publish_receipt(self.env, tx_hash=prior["txHash"])
+            token_id = (
+                str(receipt["templateId"])
+                if receipt.get("templateId") is not None
+                else prior.get("templateId")
+            )
             patch = build_publish_success_patch(
-                tx_hash=prior.get("txHash"),
-                onchain_token_id=prior.get("templateId"),
+                tx_hash=receipt.get("txHash") or prior["txHash"],
+                onchain_token_id=token_id,
                 price_wei=price_wei_int,
             )
             row = await sb.update("templates", template_uuid, patch)
@@ -487,20 +512,74 @@ class Default(WorkerEntrypoint):
                 tx=prior.get("txHash"),
                 creator=creator,
             )
-            return self._json(request, {"ok": True, "template": row, "tx": prior, "reconciled": True})
+            return self._json(
+                request,
+                {"ok": True, "template": row, "tx": receipt, "reconciled": True},
+            )
+        if prior is not None and prior.get("templateId") and not prior.get("txHash"):
+            # Token known without hash (legacy) — finalize without re-broadcast.
+            patch = build_publish_success_patch(
+                tx_hash=None,
+                onchain_token_id=prior.get("templateId"),
+                price_wei=price_wei_int,
+            )
+            row = await sb.update("templates", template_uuid, patch)
+            return self._json(
+                request,
+                {"ok": True, "template": row, "tx": prior, "reconciled": True},
+            )
+
+        # Atomic claim before chain/: only the winner may send.
+        await claim_template_for_publish(sb, template_uuid)
 
         await self._check_publish_rate_limits(session["userId"])
 
-        result = await send_publish_for(
-            self.env,
-            creator=creator,
-            price_wei=price_wei_int,
-            parent_id=int(parent_id),
-            uri=uri,
-        )
+        try:
+            sent = await send_publish_for(
+                self.env,
+                creator=creator,
+                price_wei=price_wei_int,
+                parent_id=int(parent_id),
+                uri=uri,
+            )
+        except Exception:
+            # Send never happened (or failed before returning a hash) — release claim.
+            await release_publish_claim(sb, template_uuid)
+            raise
 
-        tx_hash = result.get("txHash")
-        token_id = str(result["templateId"]) if result.get("templateId") is not None else None
+        tx_hash = sent.get("txHash")
+        if not isinstance(tx_hash, str) or not tx_hash.strip():
+            await release_publish_claim(sb, template_uuid)
+            raise PublishError("chain worker missing txHash", code="chain", status=502)
+
+        # Persist hash ASAP — before waiting for the receipt.
+        try:
+            await sb.update(
+                "templates",
+                template_uuid,
+                build_publish_broadcast_patch(tx_hash=tx_hash),
+            )
+        except Exception as persist_err:  # noqa: BLE001
+            log(
+                "publish_broadcast_persist_failed",
+                template_id=template_uuid,
+                tx=tx_hash,
+                error=repr(persist_err),
+            )
+            # Do not release claim or re-send; caller must retry to reconcile by hash.
+            raise PublishError(
+                "failed to persist publish tx hash; retry to reconcile",
+                code="persist",
+                status=502,
+            ) from persist_err
+
+        try:
+            receipt = await fetch_publish_receipt(self.env, tx_hash=tx_hash)
+        except PublishError:
+            # Hash is stored — retry will reconcile; keep claim until stale/finalize.
+            raise
+
+        token_id = str(receipt["templateId"]) if receipt.get("templateId") is not None else None
         patch = build_publish_success_patch(
             tx_hash=tx_hash,
             onchain_token_id=token_id,
@@ -509,25 +588,15 @@ class Default(WorkerEntrypoint):
         try:
             row = await sb.update("templates", template_uuid, patch)
         except Exception as e:  # noqa: BLE001
-            # Chain already broadcast — persist at least the tx hash so retries reconcile.
             log("publish_finalize_failed", template_id=template_uuid, tx=tx_hash, error=repr(e))
-            try:
-                await sb.update(
-                    "templates",
-                    template_uuid,
-                    build_publish_broadcast_patch(tx_hash=tx_hash, onchain_token_id=token_id),
-                )
-            except Exception as persist_err:  # noqa: BLE001
-                log(
-                    "publish_broadcast_persist_failed",
-                    template_id=template_uuid,
-                    tx=tx_hash,
-                    error=repr(persist_err),
-                )
-            raise PublishError("failed to persist publish; retry to reconcile", code="persist") from e
+            raise PublishError(
+                "failed to persist publish; retry to reconcile",
+                code="persist",
+                status=502,
+            ) from e
 
         log("template_published", template_id=template_uuid, tx=tx_hash, creator=creator)
-        return self._json(request, {"ok": True, "template": row, "tx": result})
+        return self._json(request, {"ok": True, "template": row, "tx": receipt})
 
     # ---- gen Worker (service binding) --------------------------------------
     async def _gen(self, method, path, payload=None):

@@ -3,6 +3,8 @@
 Instances:
   - idFromName(privy DID) → per-user limit
   - idFromName("__global__") → global cap across all users
+
+Limits and windows are hardcoded in this Worker — never taken from the request body.
 """
 
 from __future__ import annotations
@@ -10,12 +12,9 @@ from __future__ import annotations
 import json
 
 from publish import (
-    GLOBAL_PUBLISH_LIMIT,
-    GLOBAL_PUBLISH_WINDOW_SECONDS,
-    PUBLISH_LIMIT,
-    PUBLISH_WINDOW_SECONDS,
     PublishError,
     check_rate_limit,
+    resolve_rate_limit_params,
 )
 from workers import DurableObject, Response
 
@@ -39,14 +38,7 @@ class PublishRateLimitDO(DurableObject):
         if not isinstance(body, dict):
             body = {}
 
-        # API chooses limits; DO never trusts external callers (not publicly reachable).
-        scope = body.get("scope") or "user"
-        if scope == "global":
-            limit = int(body.get("limit") or GLOBAL_PUBLISH_LIMIT)
-            window = int(body.get("window") or GLOBAL_PUBLISH_WINDOW_SECONDS)
-        else:
-            limit = int(body.get("limit") or PUBLISH_LIMIT)
-            window = int(body.get("window") or PUBLISH_WINDOW_SECONDS)
+        scope, limit, window = resolve_rate_limit_params(body)
 
         history = await self.ctx.storage.get("history")
         if history is None:
