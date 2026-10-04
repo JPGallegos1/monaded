@@ -21,6 +21,18 @@ export function weiToMon(wei: bigint | string | number): string {
   return full.replace(/\.?0+$/, '')
 }
 
+/**
+ * Format wei → MON for earnings UI: at most `maxDecimals` places, no trailing zeros.
+ */
+export function weiToMonDisplay(wei: bigint | string | number, maxDecimals = 4): string {
+  const value = typeof wei === 'bigint' ? wei : BigInt(wei)
+  const full = formatEther(value)
+  if (!full.includes('.')) return full
+  const [intPart, frac = ''] = full.split('.')
+  const clipped = frac.slice(0, maxDecimals).replace(/0+$/, '')
+  return clipped ? `${intPart}.${clipped}` : intPart
+}
+
 export function txExplorerUrl(txHash: string): string {
   return `${EXPLORER_TX_BASE}/${txHash}`
 }

@@ -3,6 +3,7 @@ import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 import Footer from '../components/Footer'
 import Header from '../components/Header'
+import { ToastHost } from '../components/toast'
 import { PrivyAppProvider } from '../lib/privy/provider'
 
 import appCss from '../styles.css?url'
@@ -34,6 +35,7 @@ function RootComponent() {
         <Outlet />
       </div>
       <Footer />
+      <ToastHost />
       <TanStackDevtools
         config={{ position: 'bottom-right' }}
         plugins={[{ name: 'Tanstack Router', render: <TanStackRouterDevtoolsPanel /> }]}

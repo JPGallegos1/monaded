@@ -13,6 +13,7 @@ import {
   MARKETPLACE_ADDRESS,
   MONAD_CHAIN_ID,
   MONAD_RPC_URL,
+  NATIVE_PAYMENT_TOKEN,
   RELAYER_ADDRESS,
   ROYALTY_BPS_PER_LEVEL,
   MAX_LINEAGE_DEPTH,
@@ -246,4 +247,48 @@ export async function buyTemplate(params: BuyTxParams): Promise<Hex> {
 
 export async function waitForTx(hash: Hex) {
   return getMarketplacePublicClient().waitForTransactionReceipt({ hash })
+}
+
+/** pendingWithdrawals(token, account) — token address(0) = native MON. */
+export async function readPendingWithdrawals(
+  account: Address,
+  token: Address = NATIVE_PAYMENT_TOKEN,
+): Promise<bigint> {
+  const client = getMarketplacePublicClient()
+  return client.readContract({
+    address: MARKETPLACE_ADDRESS,
+    abi: templateMarketplaceAbi,
+    functionName: 'pendingWithdrawals',
+    args: [getAddress(token), getAddress(account)],
+  })
+}
+
+export type WithdrawTxParams = {
+  walletClient: WalletClient
+  account: Address
+}
+
+/** withdraw() native MON pending balance; gas = estimate + 20%. */
+export async function withdrawPending(params: WithdrawTxParams): Promise<Hex> {
+  const { walletClient, account } = params
+  const publicClient = getMarketplacePublicClient()
+
+  const gasEstimate = await publicClient.estimateContractGas({
+    address: MARKETPLACE_ADDRESS,
+    abi: templateMarketplaceAbi,
+    functionName: 'withdraw',
+    args: [],
+    account,
+  })
+  const gas = applyGasBuffer(gasEstimate)
+
+  return walletClient.writeContract({
+    chain: monadChain,
+    address: MARKETPLACE_ADDRESS,
+    abi: templateMarketplaceAbi,
+    functionName: 'withdraw',
+    args: [],
+    account,
+    gas,
+  })
 }

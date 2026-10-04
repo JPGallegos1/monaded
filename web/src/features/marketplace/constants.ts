@@ -24,3 +24,6 @@ export const MAX_LINEAGE_DEPTH = 3
 
 /** Gas buffer: Monad charges the full gas limit — use estimate + 20%, never a fixed 200k. */
 export const GAS_BUFFER_BPS = 12000 // 20% → multiply by 1.2
+
+/** Native MON sentinel for pendingWithdrawals / paymentToken (address(0)). */
+export const NATIVE_PAYMENT_TOKEN = '0x0000000000000000000000000000000000000000' as `0x${string}`

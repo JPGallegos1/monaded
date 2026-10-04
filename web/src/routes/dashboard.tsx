@@ -10,7 +10,7 @@ import {
   Settings,
   Wallet,
 } from 'lucide-react'
-import { EarningsCard, type EarningsCardProps } from '#/components/earnings-card'
+import { DashboardEarnings } from '#/components/dashboard-earnings'
 import { EmptyState } from '#/components/empty-state'
 import { StatCard } from '#/components/stat-card'
 import { Button } from '#/components/ui/button'
@@ -19,21 +19,6 @@ import { getTemplates, type Template } from '#/lib/api'
 import { isPrivyConfigured } from '#/lib/privy/config'
 import { usePrivySession } from '#/lib/privy/usePrivySession'
 import { cn, formatMon } from '#/lib/utils'
-
-/**
- * Placeholder earnings until PR #6 (Creator Economy indexer) lands.
- * TODO(pr-6): replace with indexer/API totals + latest transactions.
- * @see https://github.com/JPGallegos1/monaded/pull/6
- */
-const EMPTY_EARNINGS: Pick<
-  EarningsCardProps,
-  'totalEarnedMon' | 'salesMon' | 'forkRoyaltiesMon' | 'transactions'
-> = {
-  totalEarnedMon: 0,
-  salesMon: 0,
-  forkRoyaltiesMon: 0,
-  transactions: [],
-}
 
 export const Route = createFileRoute('/dashboard')({
   component: Dashboard,
@@ -192,12 +177,7 @@ function DashboardAuthed() {
                 icon={Files}
                 deltaMuted
               />
-              <EarningsCard
-                {...EMPTY_EARNINGS}
-                onPublish={() => {
-                  void navigate({ to: '/upload' })
-                }}
-              />
+              <DashboardEarnings />
             </div>
 
             <div>

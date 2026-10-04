@@ -1,39 +1,39 @@
-import { Coins, Rocket } from 'lucide-react'
+import { Link } from '@tanstack/react-router'
+import { Coins, Loader2, Rocket } from 'lucide-react'
 import { Button } from '#/components/ui/button'
 import { Card } from '#/components/ui/card'
 import { cn } from '#/lib/utils'
 
 /**
  * Creator earnings panel (dashboard).
- *
- * TODO(pr-6): wire props from the Creator Economy indexer (sales, royalties)
- * once https://github.com/JPGallegos1/monaded/pull/6 merges. Until then the
- * dashboard always passes a zero total so the empty state renders.
+ * Presentational — callers wire /me/earnings + on-chain pendingWithdrawals / withdraw().
  */
 
-export type EarningsTxType = 'sale' | 'royalty'
-
-export type EarningsTransaction = {
+export type EarningsRecentRow = {
   id: string
-  /** Template title shown in the row. */
-  templateTitle: string
-  type: EarningsTxType
-  /** Required when type === 'royalty' (1–3). */
-  royaltyLevel?: number
-  /** Amount in MON (decimal string or number). Displayed with a green "+". */
-  amountMon: string | number
-  /** ISO timestamp or Date — rendered as relative time. */
+  kind: 'sale' | 'royalty'
+  onchainTemplateId: string
+  templateId: string | null
+  templateTitle: string | null
+  amountMon: string
+  royaltyLevel: number | null
   at: string | Date
 }
 
 export type EarningsCardProps = {
-  /** Total earned in MON. Empty state shows while this is zero. */
-  totalEarnedMon: string | number
-  salesMon: string | number
-  forkRoyaltiesMon: string | number
-  /** Latest transactions; UI shows at most 5. */
-  transactions?: EarningsTransaction[]
+  /** Total earned in MON (from /me/earnings totals.earned). */
+  totalEarnedMon: string
+  salesMon: string
+  forkRoyaltiesMon: string
+  /** Live pending from pendingWithdrawals(0x0, wallet) — not the indexer field. */
+  pendingMon: string
+  pendingWei: bigint
+  recent?: EarningsRecentRow[]
+  /** True while earnings API is loading or unavailable endpoints are resolving. */
+  loading?: boolean
+  withdrawing?: boolean
   onPublish?: () => void
+  onWithdraw?: () => void
   className?: string
 }
 
@@ -41,12 +41,26 @@ export function EarningsCard({
   totalEarnedMon,
   salesMon,
   forkRoyaltiesMon,
-  transactions = [],
+  pendingMon,
+  pendingWei,
+  recent = [],
+  loading,
+  withdrawing,
   onPublish,
+  onWithdraw,
   className,
 }: EarningsCardProps) {
-  const total = toNumber(totalEarnedMon)
-  const isEmpty = total <= 0
+  const earnedZero = isZeroAmount(totalEarnedMon)
+  const pendingZero = pendingWei === 0n
+  const isEmpty = earnedZero && pendingZero
+
+  if (loading && isEmpty) {
+    return (
+      <Card className={cn('flex flex-col gap-2 p-5', className)}>
+        <p className="text-sm text-muted-foreground">Loading earnings…</p>
+      </Card>
+    )
+  }
 
   if (isEmpty) {
     return (
@@ -66,29 +80,65 @@ export function EarningsCard({
     )
   }
 
-  const latest = transactions.slice(0, 5)
+  const latest = recent.slice(0, 5)
+  const showPending = !pendingZero
 
   return (
-    <Card className={cn('flex flex-col gap-4 p-5', className)}>
+    <Card className={cn('flex flex-col gap-4 p-5', className)} data-marketplace="earnings">
       <div className="flex flex-col gap-1">
         <span className="text-[13px] font-medium text-muted-foreground">Total earned</span>
         <p className="font-mono text-[28px] font-bold tracking-tight text-foreground">
-          {formatAmount(totalEarnedMon)} MON
+          {totalEarnedMon} MON
         </p>
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span>Sales {formatAmount(salesMon)} MON</span>
-          <span>Fork royalties {formatAmount(forkRoyaltiesMon)} MON</span>
+          <span>Sales {salesMon} MON</span>
+          <span>Fork royalties {forkRoyaltiesMon} MON</span>
         </div>
       </div>
+
+      {showPending && (
+        <div className="flex items-center justify-between gap-3 rounded-md bg-accent px-3.5 py-2.5">
+          <span className="text-sm font-medium text-accent-foreground">
+            Pending: {pendingMon} MON
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={withdrawing || !onWithdraw}
+            onClick={onWithdraw}
+          >
+            {withdrawing ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Withdrawing…
+              </>
+            ) : (
+              'Withdraw'
+            )}
+          </Button>
+        </div>
+      )}
 
       {latest.length > 0 && (
         <ul className="flex flex-col gap-2.5 border-t border-border pt-3">
           {latest.map((tx) => (
             <li key={tx.id} className="flex items-start justify-between gap-3 text-sm">
               <div className="min-w-0">
-                <p className="truncate font-medium text-foreground">{tx.templateTitle}</p>
+                <p className="truncate font-medium text-foreground">
+                  {tx.templateId ? (
+                    <Link
+                      to="/templates/$templateId"
+                      params={{ templateId: tx.templateId }}
+                      className="text-foreground no-underline hover:text-primary"
+                    >
+                      {tx.templateTitle || `Template #${tx.onchainTemplateId}`}
+                    </Link>
+                  ) : (
+                    <>Template #{tx.onchainTemplateId}</>
+                  )}
+                </p>
                 <p className="text-xs text-muted-foreground">
-                  {tx.type === 'sale'
+                  {tx.kind === 'sale'
                     ? 'Sale'
                     : `Royalty · Level ${tx.royaltyLevel ?? '—'}`}
                   {' · '}
@@ -96,7 +146,7 @@ export function EarningsCard({
                 </p>
               </div>
               <span className="shrink-0 font-mono text-sm font-semibold text-success">
-                +{formatAmount(tx.amountMon)} MON
+                +{tx.amountMon} MON
               </span>
             </li>
           ))}
@@ -106,16 +156,9 @@ export function EarningsCard({
   )
 }
 
-function toNumber(v: string | number): number {
-  const n = typeof v === 'number' ? v : Number(v)
-  return Number.isFinite(n) ? n : 0
-}
-
-function formatAmount(v: string | number): string {
-  if (typeof v === 'number') {
-    return Number.isInteger(v) ? String(v) : String(v)
-  }
-  return v.trim() || '0'
+function isZeroAmount(v: string): boolean {
+  const n = Number(v)
+  return !Number.isFinite(n) || n === 0
 }
 
 function relativeTime(at: string | Date): string {

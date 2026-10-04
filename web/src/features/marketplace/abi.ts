@@ -76,6 +76,23 @@ export const templateMarketplaceAbi = [
   },
   {
     type: 'function',
+    name: 'pendingWithdrawals',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'account', type: 'address' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'withdraw',
+    stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: 'function',
     name: 'nextTemplateId',
     stateMutability: 'view',
     inputs: [],
