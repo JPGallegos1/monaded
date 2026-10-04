@@ -103,7 +103,48 @@ def test_public_template_view_allowlists_and_strips_private_fields():
     assert "content_r2_key" not in full
     assert full["content"]["sections"]
     assert "error" in full  # owner may see generation error
+    assert full["generation"]["usage"] == {"secret": 1}
     assert set(full.keys()) <= set(OWNER_TEMPLATE_FIELDS) | {"content", "generation"}
+
+
+def test_license_holder_gets_full_content_but_public_generation():
+    """Buyers unlock content; generation stays on the public allowlist (no source echo)."""
+    row = {
+        "id": "t1",
+        "title": "T",
+        "status": "ready",
+        "is_published": True,
+        "onchain_token_id": "3",
+        "content": {
+            "title": "T",
+            "summary": "S",
+            "learning_objectives": [],
+            "sections": [{"heading": "H", "explanation": "paid", "key_concepts": []}],
+            "definitions": [],
+            "worked_examples": [],
+            "practice_questions": [{"question": "q", "type": "short_answer", "choices": [], "answer": "a", "explanation": "e"}],
+            "diagrams": [],
+        },
+        "generation": {
+            "model": "m",
+            "generate_ms": 10,
+            "usage": {"prompt_chars": 999},
+            "source_excerpt": "secret pages",
+        },
+    }
+    licensed = public_template_view(
+        row,
+        include_full_content=True,
+        include_full_generation=False,
+    )
+    assert licensed["content"]["sections"]
+    assert licensed["content"]["practice_questions"]
+    assert licensed["generation"]["model"] == "m"
+    assert "usage" not in licensed["generation"]
+    assert "source_excerpt" not in licensed["generation"]
+
+    owner = public_template_view(row, include_full_content=True, include_full_generation=True)
+    assert owner["generation"]["usage"] == {"prompt_chars": 999}
 
 
 def test_build_fork_rows_sets_parent():

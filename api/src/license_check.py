@@ -144,18 +144,32 @@ def _public_generation(gen: Any) -> dict | None:
     }
 
 
-def public_template_view(row: dict, *, include_full_content: bool) -> dict:
-    """Return an allowlisted template payload (never the raw DB row)."""
+def public_template_view(
+    row: dict,
+    *,
+    include_full_content: bool,
+    include_full_generation: bool | None = None,
+) -> dict:
+    """Return an allowlisted template payload (never the raw DB row).
+
+    `include_full_generation` defaults to matching `include_full_content` for owner
+    paths. License holders should pass `include_full_content=True` with
+    `include_full_generation=False` so purchased study content is unlocked without
+    leaking generation metadata that may echo source material.
+    """
     fields = OWNER_TEMPLATE_FIELDS if include_full_content else PUBLIC_TEMPLATE_FIELDS
     out: dict[str, Any] = {k: row.get(k) for k in fields if k in row}
 
     raw_content = row.get("content") if isinstance(row.get("content"), dict) else None
     if include_full_content:
         out["content"] = raw_content
-        if isinstance(row.get("generation"), dict):
-            out["generation"] = dict(row["generation"])
     else:
         out["content"] = build_preview_content(raw_content)
+
+    full_gen = include_full_content if include_full_generation is None else include_full_generation
+    if full_gen and isinstance(row.get("generation"), dict):
+        out["generation"] = dict(row["generation"])
+    else:
         pub_gen = _public_generation(row.get("generation"))
         if pub_gen is not None:
             out["generation"] = pub_gen

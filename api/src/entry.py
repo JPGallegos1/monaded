@@ -892,9 +892,18 @@ class Default(WorkerEntrypoint):
             )
         licensed = await self._session_has_license(row, session)
         if licensed:
+            # Buyers get full study content, but only the public generation slice
+            # (full generation may echo source material).
             return self._json(
                 request,
-                {"template": public_template_view(row, include_full_content=True), "access": "license"},
+                {
+                    "template": public_template_view(
+                        row,
+                        include_full_content=True,
+                        include_full_generation=False,
+                    ),
+                    "access": "license",
+                },
             )
         raise HttpError(403, "license or ownership required", code="forbidden")
 
