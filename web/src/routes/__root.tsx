@@ -3,6 +3,7 @@ import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 import Footer from '../components/Footer'
 import Header from '../components/Header'
+import { PrivyAppProvider } from '../lib/privy/provider'
 
 import appCss from '../styles.css?url'
 import katexCss from 'katex/dist/katex.min.css?url'
@@ -49,7 +50,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body className="font-sans antialiased [overflow-wrap:anywhere] selection:bg-accent selection:text-accent-foreground">
-        {children}
+        <PrivyAppProvider>{children}</PrivyAppProvider>
         <Scripts />
       </body>
     </html>

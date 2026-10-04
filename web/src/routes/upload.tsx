@@ -18,7 +18,14 @@ import { Button } from '#/components/ui/button'
 import { Input } from '#/components/ui/input'
 import { Card } from '#/components/ui/card'
 import { StepProgress, type StepState } from '#/components/step-progress'
-import { extractMaterial, generateTemplate, uploadMaterial } from '#/lib/api'
+import {
+  extractMaterial,
+  generateTemplate,
+  uploadMaterial,
+  upsertUser,
+} from '#/lib/api'
+import { isPrivyConfigured } from '#/lib/privy/config'
+import { usePrivySession } from '#/lib/privy/usePrivySession'
 import { cn } from '#/lib/utils'
 
 export const Route = createFileRoute('/upload')({
@@ -35,7 +42,22 @@ const MODELS = [
 ] as const
 
 function Upload() {
+  if (!isPrivyConfigured()) {
+    return (
+      <main className="page-wrap page-body">
+        <h1 className="font-display text-4xl font-bold tracking-tight">Create a study template</h1>
+        <p className="mt-2 text-base text-muted-foreground">
+          Set VITE_PRIVY_APP_ID to enable login before uploading.
+        </p>
+      </main>
+    )
+  }
+  return <UploadAuthed />
+}
+
+function UploadAuthed() {
   const navigate = useNavigate()
+  const { ready, authenticated, login, syncSession, session } = usePrivySession()
   const [file, setFile] = useState<File | null>(null)
   const [startPage, setStartPage] = useState('1')
   const [endPage, setEndPage] = useState('')
@@ -66,10 +88,17 @@ function Upload() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!file) return
+    if (!authenticated) {
+      login()
+      return
+    }
     setError(null)
     setPhase('working')
     setStepIndex(0)
     try {
+      setStatusDetail('Syncing session…')
+      await syncSession()
+      await upsertUser({})
       setStatusDetail('Uploading…')
       const { material } = await uploadMaterial(file)
       setStepIndex(1)
@@ -148,6 +177,25 @@ function Upload() {
         </p>
       </div>
 
+      {!ready ? (
+        <p className="mb-4 text-sm text-muted-foreground">Loading auth…</p>
+      ) : !authenticated ? (
+        <Card className="mb-6 flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-muted-foreground">
+            Sign in so your upload is owned by your account.
+          </p>
+          <Button onClick={() => login()}>Sign in</Button>
+        </Card>
+      ) : (
+        <p className="mb-4 text-sm text-muted-foreground" data-session-user={session?.userId ?? ''}>
+          Signed in
+          {session?.walletAddress
+            ? ` · ${session.walletAddress.slice(0, 6)}…${session.walletAddress.slice(-4)}`
+            : ''}
+          .
+        </p>
+      )}
+
       <div className="grid gap-6 lg:grid-cols-[minmax(0,760px)_1fr]">
         <form onSubmit={onSubmit} className="surface-card flex flex-col gap-5 p-7">
           <label
@@ -160,6 +208,7 @@ function Upload() {
             className={cn(
               'relative flex h-[220px] cursor-pointer flex-col items-center justify-center gap-2.5 rounded-lg border-[1.5px] border-dashed bg-accent',
               dragOver ? 'border-primary' : 'border-primary/70',
+              !authenticated && 'pointer-events-none opacity-60',
             )}
           >
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white/50 text-accent-foreground dark:bg-black/20">
@@ -171,6 +220,7 @@ function Upload() {
               type="file"
               accept="application/pdf,.pdf"
               required={!file}
+              disabled={!authenticated}
               className="sr-only"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
@@ -195,6 +245,7 @@ function Upload() {
               type="number"
               min={1}
               value={startPage}
+              disabled={!authenticated}
               onChange={(e) => setStartPage(e.target.value)}
             />
             <Input
@@ -203,6 +254,7 @@ function Upload() {
               min={1}
               value={endPage}
               placeholder="Optional"
+              disabled={!authenticated}
               onChange={(e) => setEndPage(e.target.value)}
             />
           </div>
@@ -215,6 +267,7 @@ function Upload() {
                   key={s}
                   type="button"
                   onClick={() => setStyle(s)}
+                  disabled={!authenticated}
                   className={cn(
                     'rounded-sm px-3.5 py-2 text-[13px] font-medium',
                     style === s
@@ -233,6 +286,7 @@ function Upload() {
             <div className="relative">
               <select
                 value={model}
+                disabled={!authenticated}
                 onChange={(e) => setModel(e.target.value as typeof model)}
                 className="w-full appearance-none rounded-md border border-border bg-background px-3 py-2.5 pr-10 text-sm outline-none"
               >
@@ -245,14 +299,15 @@ function Upload() {
               <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             </div>
             <span className="text-xs text-muted-foreground">
-              Best math quality takes longer (up to ~40 s).
+              Best math quality takes longer (up to ~40 s). Model picker is UI-only until the gen
+              worker exposes it.
             </span>
           </div>
 
           {error && <p className="text-sm text-destructive">Error: {error}</p>}
 
           <div className="flex justify-end">
-            <Button type="submit" disabled={!file}>
+            <Button type="submit" disabled={!file || !authenticated}>
               <Sparkles className="h-4 w-4" />
               Generate template
             </Button>

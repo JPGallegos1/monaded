@@ -6,7 +6,7 @@ import { cn } from '#/lib/utils'
 
 /**
  * Presentational publish dialog (design 05a).
- * `onPublish` is a callback only — contract/tx logic belongs in the Privy/onchain PR.
+ * `onPublish` is a callback only — contract/tx logic lives in marketplace hooks.
  */
 export type PublishDialogProps = {
   open: boolean
@@ -130,7 +130,6 @@ export function PublishDialog({
               <Rocket className="h-4 w-4" />
               {isLoading ? 'Publishing…' : 'Publish to Monad'}
             </Button>
-            {/* TODO(privy): onPublish → mint/publish via TemplateMarketplace */}
           </div>
         </div>
       </div>

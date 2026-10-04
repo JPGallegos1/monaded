@@ -2,6 +2,8 @@ import { Link, useRouterState } from '@tanstack/react-router'
 import { Upload } from 'lucide-react'
 import ThemeToggle from '#/components/ThemeToggle'
 import { Button } from '#/components/ui/button'
+import { isPrivyConfigured } from '#/lib/privy/config'
+import { usePrivySession } from '#/lib/privy/usePrivySession'
 import { cn } from '#/lib/utils'
 
 export type NavUser = {
@@ -12,7 +14,7 @@ export type NavUser = {
 
 /**
  * Presentational navbar auth slot.
- * Privy wiring (login / logout / wallet) should plug into these props — do not add auth logic here.
+ * Privy wiring (login / logout / wallet) plugs into these props — do not add auth logic here.
  */
 export type NavbarAuthProps = {
   user?: NavUser
@@ -80,14 +82,13 @@ export function Navbar({
             <Upload className="h-4 w-4" />
             {ctaLabel}
           </Link>
-          {/* Auth slot — Privy plugs into onSignIn / user / onSignOut */}
           {user ? (
             <button
               type="button"
               onClick={auth?.onSignOut}
               title={user.email ?? user.name ?? 'Signed in'}
               className="avatar-gradient h-8 w-8 rounded-full ring-2 ring-border"
-              aria-label="Account"
+              aria-label="Sign out"
             />
           ) : (
             <Button
@@ -113,23 +114,59 @@ function activeFromPath(pathname: string): 'Explore' | 'Create' | 'Library' | 'D
   return undefined
 }
 
-/** Default export keeps __root.tsx simple; auth props can be threaded later via context. */
+function HeaderWithPrivy({
+  active,
+}: {
+  active?: 'Explore' | 'Create' | 'Library' | 'Dashboard'
+}) {
+  const { ready, authenticated, login, logout, walletAddress, user } = usePrivySession()
+  const email =
+    user?.email?.address ??
+    (typeof user?.google?.email === 'string' ? user.google.email : null) ??
+    null
+
+  return (
+    <Navbar
+      active={active}
+      auth={{
+        user: authenticated
+          ? {
+              name: walletAddress
+                ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
+                : 'Signed in',
+              email,
+            }
+          : null,
+        onSignIn: () => login(),
+        onSignOut: () => {
+          void logout()
+        },
+        isLoading: !ready,
+      }}
+    />
+  )
+}
+
+/** Default export keeps __root.tsx simple; auth is wired via usePrivySession. */
 export default function Header(props: {
   active?: 'Explore' | 'Create' | 'Library' | 'Dashboard'
 }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const active = props.active ?? activeFromPath(pathname)
-  return (
-    <Navbar
-      active={active}
-      // TODO(privy): pass real user + onSignIn/onSignOut from Privy provider
-      auth={{
-        user: null,
-        onSignIn: () => {
-          // TODO(privy): open Privy login modal
-          window.location.href = '/signin'
-        },
-      }}
-    />
-  )
+
+  if (!isPrivyConfigured()) {
+    return (
+      <Navbar
+        active={active}
+        auth={{
+          user: null,
+          onSignIn: () => {
+            window.location.href = '/signin'
+          },
+        }}
+      />
+    )
+  }
+
+  return <HeaderWithPrivy active={active} />
 }

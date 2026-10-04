@@ -5,7 +5,7 @@ import { cn } from '#/lib/utils'
 
 /**
  * Presentational Sign in screen (design 02).
- * No Privy / wallet logic — wire `onContinueEmail`, `onContinueGoogle`, `onContinueX` from the Privy PR.
+ * No Privy / wallet logic — callers wire continue callbacks to Privy login.
  */
 export type SignInCardProps = {
   email?: string
@@ -75,7 +75,6 @@ export function SignInCard({
           </p>
         </div>
         <p className="text-center text-xs font-medium text-muted-foreground">Protected by Privy</p>
-        {/* TODO(privy): replace stub handlers with Privy login methods */}
       </div>
     </div>
   )

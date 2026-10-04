@@ -4,12 +4,12 @@
 	"name": "edtech-monad-web",
 	"compatibility_date": "2026-10-01",
 	"compatibility_flags": ["nodejs_compat"],
-	"main": "@tanstack/react-start/server-entry",
+	"main": "src/server.ts",
 	"observability": {
 		"enabled": true,
 		"traces": { "enabled": true }
 	},
 	"upload_source_maps": true,
-	// SSR loaders reach the Python API through this binding (same-account workers.dev URLs can't be fetched).
+	// SSR loaders + /api/* proxy reach the Python API through this binding.
 	"services": [{ "binding": "API", "service": "edtech-monad-api" }]
 }

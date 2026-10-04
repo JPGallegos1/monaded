@@ -5,7 +5,7 @@ import { cn } from '#/lib/utils'
 
 /**
  * Presentational purchase / fork actions for template detail (design 07).
- * Wire `onBuy` to the Privy/wallet `buy()` call in a separate PR — no chain logic here.
+ * Callers wire `onBuy` / `onFork` to marketplace hooks — no chain logic here.
  */
 export type BuyLicenseCardProps = {
   price?: number | string | null
@@ -40,8 +40,6 @@ export function BuyLicenseCard({
           {isLoading ? 'Confirming…' : 'Buy license'}
         </Button>
       )}
-      {/* TODO(privy): onBuy → TemplateMarketplace.buy() via embedded wallet */}
-
       <Button variant="secondary" className="w-full" onClick={onFork} disabled={isLoading}>
         <GitFork className="h-4 w-4" />
         Fork this template

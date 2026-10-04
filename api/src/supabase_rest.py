@@ -99,6 +99,21 @@ class Supabase:
         )
         return rows[0] if rows else None
 
+    async def update_where(self, table, query, patch):
+        """Conditional PATCH. `query` is the PostgREST filter string after `table?`.
+
+        Returns the first matching row, or None when zero rows matched (claim lost).
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("update_where requires a non-empty query")
+        q = query.strip().lstrip("?")
+        rows = await self.request(
+            "PATCH", f"{table}?{q}", body=patch, prefer="return=representation"
+        )
+        if not rows:
+            return None
+        return rows[0] if isinstance(rows, list) else rows
+
     async def get(self, table, row_id, select="*"):
         rows = await self.request("GET", f"{table}?select={select}&id=eq.{quote(str(row_id))}&limit=1")
         return rows[0] if rows else None
@@ -106,3 +121,13 @@ class Supabase:
     async def list_where(self, table, column, value, select="*", order="created_at.desc", limit=50):
         q = f"{table}?select={select}&{column}=eq.{quote(str(value))}&order={order}&limit={int(limit)}"
         return await self.request("GET", q)
+
+    async def get_by(self, table, column, value, select="*"):
+        rows = await self.request(
+            "GET", f"{table}?select={select}&{column}=eq.{quote(str(value))}&limit=1"
+        )
+        return rows[0] if rows else None
+
+    async def insert_purchase(self, row):
+        """Insert a verified purchase. Unique tx_hash → 409-style SupabaseError on replay."""
+        return await self.insert("purchases", row)
