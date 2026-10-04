@@ -7,19 +7,33 @@ import {
   LayoutDashboard,
   Library,
   Plus,
-  Rocket,
   Settings,
   Wallet,
 } from 'lucide-react'
+import { EarningsCard, type EarningsCardProps } from '#/components/earnings-card'
 import { EmptyState } from '#/components/empty-state'
 import { StatCard } from '#/components/stat-card'
 import { Button } from '#/components/ui/button'
-import { Card } from '#/components/ui/card'
 import { getMarketplacePublicClient, weiToMon } from '#/features/marketplace'
 import { getTemplates, type Template } from '#/lib/api'
 import { isPrivyConfigured } from '#/lib/privy/config'
 import { usePrivySession } from '#/lib/privy/usePrivySession'
 import { cn, formatMon } from '#/lib/utils'
+
+/**
+ * Placeholder earnings until PR #6 (Creator Economy indexer) lands.
+ * TODO(pr-6): replace with indexer/API totals + latest transactions.
+ * @see https://github.com/JPGallegos1/monaded/pull/6
+ */
+const EMPTY_EARNINGS: Pick<
+  EarningsCardProps,
+  'totalEarnedMon' | 'salesMon' | 'forkRoyaltiesMon' | 'transactions'
+> = {
+  totalEarnedMon: 0,
+  salesMon: 0,
+  forkRoyaltiesMon: 0,
+  transactions: [],
+}
 
 export const Route = createFileRoute('/dashboard')({
   component: Dashboard,
@@ -178,23 +192,12 @@ function DashboardAuthed() {
                 icon={Files}
                 deltaMuted
               />
-              <Card className="flex flex-col items-start gap-2.5 p-5">
-                <div className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-accent text-accent-foreground">
-                  <Coins className="h-5 w-5" />
-                </div>
-                <p className="text-base font-semibold">Earnings appear here after your first sale</p>
-                <p className="text-[13px] leading-relaxed text-muted-foreground">
-                  Sales and fork royalties are paid in MON, straight to your wallet.
-                </p>
-                <Button
-                  onClick={() => {
-                    void navigate({ to: '/upload' })
-                  }}
-                >
-                  <Rocket className="h-4 w-4" />
-                  Publish a template
-                </Button>
-              </Card>
+              <EarningsCard
+                {...EMPTY_EARNINGS}
+                onPublish={() => {
+                  void navigate({ to: '/upload' })
+                }}
+              />
             </div>
 
             <div>
