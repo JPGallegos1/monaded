@@ -1,3 +1,9 @@
 # Copy to .dev.vars for local `uv run pywrangler dev`. Never commit .dev.vars.
 SUPABASE_URL=https://YOUR-PROJECT.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
+# Privy (App ID is public; App Secret is server-only)
+PRIVY_APP_ID=cmusv5fsd01zn0cl383kjq1vk
+PRIVY_APP_SECRET=your-privy-app-secret
+# Optional overrides
+# MARKETPLACE_ADDRESS=0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e
+# MONAD_RPC_URL=https://testnet-rpc.monad.xyz

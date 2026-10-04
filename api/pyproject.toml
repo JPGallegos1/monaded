@@ -9,4 +9,9 @@ dependencies = []
 dev = [
     "workers-py",
     "workers-runtime-sdk",
+    "pytest>=8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

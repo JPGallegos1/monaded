@@ -106,3 +106,13 @@ class Supabase:
     async def list_where(self, table, column, value, select="*", order="created_at.desc", limit=50):
         q = f"{table}?select={select}&{column}=eq.{quote(str(value))}&order={order}&limit={int(limit)}"
         return await self.request("GET", q)
+
+    async def get_by(self, table, column, value, select="*"):
+        rows = await self.request(
+            "GET", f"{table}?select={select}&{column}=eq.{quote(str(value))}&limit=1"
+        )
+        return rows[0] if rows else None
+
+    async def insert_purchase(self, row):
+        """Insert a verified purchase. Unique tx_hash → 409-style SupabaseError on replay."""
+        return await self.insert("purchases", row)
