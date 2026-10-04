@@ -2,7 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import { getMyEarnings, getTemplate, type MeEarningsResponse } from '../api'
 import { usePrivySession } from '#/lib/privy/usePrivySession'
 
-export type EarningsAvailability = 'loading' | 'ready' | 'unavailable' | 'unauthenticated'
+export type EarningsAvailability =
+  | 'loading'
+  | 'ready'
+  /** 401 or 404 — show empty card (endpoint missing / no session data). */
+  | 'unavailable'
+  | 'unauthenticated'
+  /** Network or 5xx — show error + Retry; do not use the empty card. */
+  | 'error'
 
 export type UseMyEarningsResult = {
   status: EarningsAvailability
@@ -15,7 +22,7 @@ export type UseMyEarningsResult = {
 
 /**
  * GET /me/earnings via the Python API (session cookie).
- * 404 / network → status "unavailable" (dashboard shows empty until PR #6 deploys).
+ * Only 401/404 → "unavailable". Network and 5xx → "error" (Retry).
  */
 export function useMyEarnings(): UseMyEarningsResult {
   const { ready, authenticated } = usePrivySession()
@@ -88,7 +95,7 @@ export function useMyEarnings(): UseMyEarningsResult {
         setData(null)
         setTemplateTitles({})
         setError(e instanceof Error ? e.message : String(e))
-        setStatus('unavailable')
+        setStatus('error')
       })
 
     return () => {

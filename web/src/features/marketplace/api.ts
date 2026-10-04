@@ -64,23 +64,21 @@ export { getTemplates, getTemplate } from '#/lib/api'
 
 /**
  * Creator earnings summary + latest 5 events (PR #6).
- * Returns `null` when the endpoint is missing (404) or the network fails so the UI
- * can degrade to the empty card until #6 is deployed.
- * Throws on 401 so callers can treat "not signed in" separately.
+ * - 401 / 404 → `null` (dashboard empty card; endpoint not deployed or no session)
+ * - 5xx / other HTTP errors → throws
+ * - Network failures → throws
  */
 export async function getMyEarnings(): Promise<MeEarningsResponse | null> {
+  let res: Response
   try {
-    const res = await apiFetch('/me/earnings')
-    if (res.status === 404) return null
-    if (res.status === 401) throw new Error('Sign in to view earnings')
-    const body = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      // Other server errors: treat as unavailable (endpoint may be mid-deploy).
-      return null
-    }
-    return body as MeEarningsResponse
+    res = await apiFetch('/me/earnings')
   } catch (e) {
-    if (e instanceof Error && e.message === 'Sign in to view earnings') throw e
-    return null
+    throw new Error(e instanceof Error ? e.message : 'Network error loading earnings')
   }
+  if (res.status === 401 || res.status === 404) return null
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
+  }
+  return body as MeEarningsResponse
 }

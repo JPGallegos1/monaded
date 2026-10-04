@@ -12,8 +12,7 @@ import {
 
 /**
  * Dashboard earnings: /me/earnings for totals/history + live pendingWithdrawals + withdraw().
- * Until PR #6 deploys, the API hook reports "unavailable" and the card stays empty
- * (unless there is on-chain pending to withdraw).
+ * 401/404 → empty card. Network/5xx → error + Retry. Pending is always on-chain.
  */
 export function DashboardEarnings() {
   const navigate = useNavigate()
@@ -54,7 +53,9 @@ export function DashboardEarnings() {
       pendingWei={pending.pendingWei}
       recent={recent}
       loading={earnings.status === 'loading'}
+      loadError={earnings.status === 'error'}
       withdrawing={withdrawing}
+      onRetry={() => earnings.refresh()}
       onPublish={() => {
         void navigate({ to: '/upload' })
       }}

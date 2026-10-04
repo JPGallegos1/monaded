@@ -29,11 +29,17 @@ export type EarningsCardProps = {
   pendingMon: string
   pendingWei: bigint
   recent?: EarningsRecentRow[]
-  /** True while earnings API is loading or unavailable endpoints are resolving. */
+  /** True while earnings API is loading. */
   loading?: boolean
+  /**
+   * Network / 5xx from /me/earnings. Shows error + Retry instead of empty card.
+   * Pending line still renders independently when pendingWei > 0.
+   */
+  loadError?: boolean
   withdrawing?: boolean
   onPublish?: () => void
   onWithdraw?: () => void
+  onRetry?: () => void
   className?: string
 }
 
@@ -45,19 +51,49 @@ export function EarningsCard({
   pendingWei,
   recent = [],
   loading,
+  loadError,
   withdrawing,
   onPublish,
   onWithdraw,
+  onRetry,
   className,
 }: EarningsCardProps) {
   const earnedZero = isZeroAmount(totalEarnedMon)
   const pendingZero = pendingWei === 0n
   const isEmpty = earnedZero && pendingZero
+  const showPending = !pendingZero
+
+  if (loadError) {
+    return (
+      <Card className={cn('flex flex-col gap-4 p-5', className)} data-marketplace="earnings-error">
+        <div className="flex flex-col items-start gap-2.5">
+          <p className="text-base font-semibold">Couldn&apos;t load earnings</p>
+          <Button variant="secondary" onClick={onRetry} disabled={!onRetry}>
+            Retry
+          </Button>
+        </div>
+        {showPending && (
+          <PendingRow
+            pendingMon={pendingMon}
+            withdrawing={withdrawing}
+            onWithdraw={onWithdraw}
+          />
+        )}
+      </Card>
+    )
+  }
 
   if (loading && isEmpty) {
     return (
       <Card className={cn('flex flex-col gap-2 p-5', className)}>
         <p className="text-sm text-muted-foreground">Loading earnings…</p>
+        {showPending && (
+          <PendingRow
+            pendingMon={pendingMon}
+            withdrawing={withdrawing}
+            onWithdraw={onWithdraw}
+          />
+        )}
       </Card>
     )
   }
@@ -81,7 +117,6 @@ export function EarningsCard({
   }
 
   const latest = recent.slice(0, 5)
-  const showPending = !pendingZero
 
   return (
     <Card className={cn('flex flex-col gap-4 p-5', className)} data-marketplace="earnings">
@@ -97,26 +132,11 @@ export function EarningsCard({
       </div>
 
       {showPending && (
-        <div className="flex items-center justify-between gap-3 rounded-md bg-accent px-3.5 py-2.5">
-          <span className="text-sm font-medium text-accent-foreground">
-            Pending: {pendingMon} MON
-          </span>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={withdrawing || !onWithdraw}
-            onClick={onWithdraw}
-          >
-            {withdrawing ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Withdrawing…
-              </>
-            ) : (
-              'Withdraw'
-            )}
-          </Button>
-        </div>
+        <PendingRow
+          pendingMon={pendingMon}
+          withdrawing={withdrawing}
+          onWithdraw={onWithdraw}
+        />
       )}
 
       {latest.length > 0 && (
@@ -153,6 +173,39 @@ export function EarningsCard({
         </ul>
       )}
     </Card>
+  )
+}
+
+function PendingRow({
+  pendingMon,
+  withdrawing,
+  onWithdraw,
+}: {
+  pendingMon: string
+  withdrawing?: boolean
+  onWithdraw?: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md bg-accent px-3.5 py-2.5">
+      <span className="text-sm font-medium text-accent-foreground">
+        Pending: {pendingMon} MON
+      </span>
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={withdrawing || !onWithdraw}
+        onClick={onWithdraw}
+      >
+        {withdrawing ? (
+          <>
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Withdrawing…
+          </>
+        ) : (
+          'Withdraw'
+        )}
+      </Button>
+    </div>
   )
 }
 
