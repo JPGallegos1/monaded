@@ -115,13 +115,15 @@ function TemplateView() {
     ? [
         { id: 'summary', label: 'Summary', icon: AlignLeft },
         ...(preview.learning_objectives && preview.learning_objectives.length > 0
-          ? [{ id: 'objectives', label: 'Learning objectives', icon: Target }]
+          ? [{ id: 'objectives', label: "What you'll learn", icon: Target }]
           : []),
-        ...sectionLabels.map((label, i) => ({
-          id: `locked-section-${i}`,
-          label,
-          icon: Lock,
-        })),
+        ...(sectionLabels.length > 0
+          ? sectionLabels.map((label, i) => ({
+              id: `locked-section-${i}`,
+              label,
+              icon: Lock,
+            }))
+          : [{ id: 'locked-template', label: 'Full template', icon: Lock }]),
       ]
     : [
         { id: 'summary', label: 'Summary', icon: AlignLeft },
@@ -338,7 +340,9 @@ function TemplateView() {
                 [
                   'Sections',
                   gated.isPreviewOnly
-                    ? String(sectionLabels.length)
+                    ? sectionLabels.length > 0
+                      ? String(sectionLabels.length)
+                      : '—'
                     : String(c?.sections.length ?? '—'),
                 ],
                 [
@@ -426,8 +430,9 @@ function OwnedLicenseCard({
 }
 
 /**
- * Public preview only: summary (in hero) + optional objectives + locked section skeletons.
+ * Public preview only: summary (in hero) + optional "What you'll learn" + locked skeletons.
  * Never receives gated body copy — placeholders only.
+ * When the API returns no section titles, one generic locked block; otherwise one card per title.
  */
 function PreviewBody({
   preview,
@@ -441,26 +446,36 @@ function PreviewBody({
   }
   sectionLabels: string[]
 }) {
+  const objectives = preview.learning_objectives ?? []
+
   return (
     <div className="flex flex-col gap-10" data-marketplace="preview">
-      {preview.learning_objectives && preview.learning_objectives.length > 0 && (
+      {objectives.length > 0 && (
         <section id="objectives" className="flex flex-col gap-3">
-          <SectionHeading n="01" title="Learning objectives" />
-          {preview.learning_objectives.map((o, i) => (
-            <div key={i} className="flex items-start gap-2.5 text-[15px]">
-              <CircleCheck className="mt-0.5 h-[18px] w-[18px] shrink-0 text-primary" />
-              <RichText text={o} />
-            </div>
-          ))}
+          <SectionHeading n="01" title="What you'll learn" />
+          <ul className="flex flex-col gap-2.5">
+            {objectives.map((o, i) => (
+              <li key={i} className="flex items-start gap-2.5 text-[15px]">
+                <CircleCheck className="mt-0.5 h-[18px] w-[18px] shrink-0 text-primary" />
+                <RichText text={o} />
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
       <section className="flex flex-col gap-4" data-marketplace="locked-sections">
-        {sectionLabels.map((title, i) => (
-          <div key={title} id={`locked-section-${i}`}>
-            <LockedSectionCard title={title} />
+        {sectionLabels.length > 0 ? (
+          sectionLabels.map((title, i) => (
+            <div key={`${i}-${title}`} id={`locked-section-${i}`}>
+              <LockedSectionCard title={title} />
+            </div>
+          ))
+        ) : (
+          <div id="locked-template">
+            <LockedSectionCard message="Full template unlocks with a license" />
           </div>
-        ))}
+        )}
       </section>
     </div>
   )
