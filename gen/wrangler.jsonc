@@ -13,10 +13,12 @@
 	"ai": { "binding": "AI" },
 	"r2_buckets": [{ "binding": "PDFS", "bucket_name": "edtech-monad-pdfs" }],
 	"vars": {
-		// LLM provider: "cloudflare" (Workers AI, default) or "openai" (also needs the OPENAI_API_KEY secret;
-		// optional OPENAI_MODEL, default gpt-6-luna, and OPENAI_REASONING_EFFORT). Override with --var LLM_PROVIDER:openai.
-		"LLM_PROVIDER": "cloudflare",
-		// Workers AI chat model used through @tanstack/ai-cloudflare. Override per deploy with --var AI_MODEL:<id>.
+		// LLM provider: "openai" (default: OpenAI gpt-6-luna, reasoning effort low; needs the OPENAI_API_KEY secret)
+		// or "cloudflare" (fallback: Workers AI, model from AI_MODEL). Switch with --var LLM_PROVIDER:cloudflare.
+		"LLM_PROVIDER": "openai",
+		"OPENAI_MODEL": "gpt-6-luna",
+		"OPENAI_REASONING_EFFORT": "low",
+		// Fallback Workers AI chat model (LLM_PROVIDER=cloudflare) used through @tanstack/ai-cloudflare. Override per deploy with --var AI_MODEL:<id>.
 		"AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
 		// Hard caps for one generation (small-context 8B model; ~2.8 chars/token on math text).
 		"MAX_PAGES": "12",

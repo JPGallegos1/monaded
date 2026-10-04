@@ -4,7 +4,8 @@
  *   GET  /health
  *   POST /extract   {material_id, r2_key, filename}           -> PDF (R2) -> Workers AI toMarkdown -> pages JSON in R2
  *   POST /generate  {material_id, text_r2_key, start_page?, end_page?, learning_style?}
- *                   -> slice pages -> TanStack AI chat() + outputSchema (Workers AI via @tanstack/ai-cloudflare)
+ *                   -> slice pages -> TanStack AI chat() + outputSchema (OpenAI gpt-6-luna via @tanstack/ai-openai by default,
+ *                      Workers AI via @tanstack/ai-cloudflare as the fallback)
  *                   -> template JSON also stored in R2 (templates/<material>/<ts>.json)
  *
  * It never talks to Supabase; the Python API persists everything.
@@ -25,7 +26,7 @@ export interface Env {
   AI_REASONING_EFFORT?: string
   /** 'true' = run non-streaming AI calls as a stream on the wire and aggregate (see streamAggregatingBinding). */
   AI_STREAM_AGGREGATE?: string
-  /** 'cloudflare' (default, Workers AI) | 'openai' */
+  /** 'openai' (default in wrangler.jsonc: gpt-6-luna, effort low) | 'cloudflare' (fallback, Workers AI; also used when unset) */
   LLM_PROVIDER?: string
   OPENAI_API_KEY?: string // secret
   OPENAI_MODEL?: string
@@ -49,7 +50,17 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(request.url)
     try {
-      if (pathname === '/health') return json({ ok: true, service: 'edtech-monad-gen', model: env.AI_MODEL })
+      if (pathname === '/health') {
+        const provider = (env.LLM_PROVIDER || 'cloudflare').toLowerCase()
+        const openai = provider === 'openai'
+        return json({
+          ok: true,
+          service: 'edtech-monad-gen',
+          provider,
+          model: openai ? env.OPENAI_MODEL || 'gpt-6-luna' : env.AI_MODEL,
+          reasoning_effort: (openai ? env.OPENAI_REASONING_EFFORT : env.AI_REASONING_EFFORT) || null,
+        })
+      }
       if (request.method !== 'POST') throw new HttpError(405, 'method not allowed')
       const body = (await request.json().catch(() => null)) as Record<string, unknown> | null
       if (!body || typeof body !== 'object') throw new HttpError(400, 'invalid JSON body')

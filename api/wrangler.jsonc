@@ -10,7 +10,7 @@
 	},
 	// PDFs, extracted page text and template JSON (shared with edtech-monad-gen).
 	"r2_buckets": [{ "binding": "PDFS", "bucket_name": "edtech-monad-pdfs" }],
-	// Internal TypeScript Worker doing text extraction + AI generation (TanStack AI on Workers AI).
+	// Internal TypeScript Worker doing text extraction + AI generation (TanStack AI: OpenAI gpt-6-luna by default, Workers AI fallback).
 	"services": [
 		{ "binding": "GEN", "service": "edtech-monad-gen" },
 		// Relayer-signed publishFor (viem). workers_dev: false — only via this binding.
