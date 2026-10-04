@@ -18,6 +18,8 @@ Routes:
   POST /materials/{id}/templates   -> JSON {start_page?, end_page?, learning_style?}
                                       -> AI study template via the gen Worker, saved to `templates`
 
+  GET  /me/earnings                -> creator dashboard totals + recent sales/royalties (session; native MON)
+
 Internal (indexer / backfill only — require X-Edtech-Internal == INDEXER_INTERNAL_SECRET):
   GET  /internal/indexer/cursor    -> {cursor: {chain_id, contract, last_block}}
   POST /internal/indexer/events    -> idempotent upsert of decoded logs + advance cursor
@@ -89,6 +91,7 @@ from indexer import (
     parse_ingest_payload,
     require_internal,
 )
+from earnings import get_earnings_for_wallet
 
 DEV_ORIGINS = {
     "http://localhost:3000",
@@ -192,6 +195,8 @@ class Default(WorkerEntrypoint):
                 return await self.get_auth_session(request)
             if path == "/auth/logout" and method == "POST":
                 return await self.logout(request)
+            if path == "/me/earnings" and method == "GET":
+                return await self.me_earnings(request)
             if path == "/purchases/verify" and method == "POST":
                 return await self.verify_purchase(request)
             if path == "/internal/indexer/cursor" and method == "GET":
@@ -222,7 +227,16 @@ class Default(WorkerEntrypoint):
                 if sub == "/templates" and method == "POST":
                     return await self.generate_template(request, mid)
                 return self._json(request, {"error": "method not allowed"}, 405)
-            if path in ("/health", "/templates", "/users", "/materials", "/auth/session", "/auth/logout", "/purchases/verify"):
+            if path in (
+                "/health",
+                "/templates",
+                "/users",
+                "/materials",
+                "/auth/session",
+                "/auth/logout",
+                "/me/earnings",
+                "/purchases/verify",
+            ):
                 return self._json(request, {"error": "method not allowed"}, 405)
             return self._json(request, {"error": "not found"}, 404)
         except HttpError as e:
@@ -417,6 +431,21 @@ class Default(WorkerEntrypoint):
             await delete_session(self.env, sid)
         cookie = session_cookie_header("", 0, clear=True)
         return self._json(request, {"ok": True}, set_cookie=cookie)
+
+    # ---- Creator earnings (session wallet only) ---------------------------
+    async def me_earnings(self, request):
+        """Native-MON creator totals + recent sales/royalties for the session wallet."""
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            return self._json(request, {"error": str(e)}, 401)
+        wallet = session.get("walletAddress") or session.get("wallet_address")
+        if not isinstance(wallet, str) or not wallet.strip():
+            return self._json(request, {"error": "not authenticated"}, 401)
+        # Never take wallet from query/body — session only.
+        sb = Supabase(self.env)
+        payload = await get_earnings_for_wallet(sb, wallet)
+        return self._json(request, payload)
 
     # ---- Internal indexer (service binding / backfill only) ---------------
     async def indexer_cursor(self, request):
