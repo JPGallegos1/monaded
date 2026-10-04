@@ -12,8 +12,11 @@ Browser ──► edtech-monad-web  (TanStack Start, Cloudflare Worker with stat
                │  PostgREST     │  R2 `PDFS`   │  `GEN`     │  `CHAIN`    │  Durable Objects
                ▼                ▼              ▼            ▼             ▼
            Supabase         R2 pdfs      edtech-monad-gen  edtech-monad-chain  SessionDO
-           (+ purchases)                  (AI, internal)   (relayer publishFor,  (userId+wallet)
-                                                            internal; viem)
+           (+ sales/…       (AI, internal)   (relayer publishFor,  (userId+wallet)
+            purchases)                        internal; viem)
+               ▲
+               │  service binding + X-Edtech-Internal
+           edtech-monad-indexer  (Cron, viem eth_getLogs → decode → POST /internal/indexer/*)
 ```
 
 * **`api/`** — Worker `edtech-monad-api`, pure Python (`src/entry.py`, `src/supabase_rest.py`). The **only** component that talks to Supabase, via PostgREST with `SUPABASE_SERVICE_ROLE_KEY`.
@@ -30,7 +33,10 @@ Browser ──► edtech-monad-web  (TanStack Start, Cloudflare Worker with stat
   * `GET /materials/{id}` → material + its templates
   * `POST /materials/{id}/extract` → gen Worker converts the PDF to text (Workers AI `toMarkdown`, which emits `### Page N` markers), stores page text in R2, sets `page_count`, returns `suggested_start_page` (first "Chapter…" page that isn't the table of contents) and page previews.
   * `POST /materials/{id}/templates` → JSON `{start_page?, end_page?, learning_style?}`; inserts a `templates` row (`status=generating`), calls gen `/generate`, then saves `content` (jsonb), `description`, `generation`, `content_r2_key`, `content_hash`, `status=ready` (or `failed` + `error`).
-  * CORS: only `FRONTEND_ORIGIN` + localhost dev origins (`Access-Control-Allow-Credentials` for session cookies). Secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `PRIVY_APP_SECRET`. Vars: `PRIVY_APP_ID`, `MARKETPLACE_ADDRESS`, `MONAD_RPC_URL`. Bindings: `PDFS` (R2), `GEN`, `CHAIN`, `SESSIONS`, `PUBLISH_RATE_LIMITS`.
+  * `GET /me/earnings` → session required; creator dashboard for the session wallet only (native MON / `address(0)`). Returns `{wallet, token, totals: {earned, sales, royalties, pending_withdrawal, withdrawn}, recent: [... last 5 sales/royalties]}` with wei as decimal strings. Empty wallet → zeros + `[]`, not 404.
+  * Internal (indexer / backfill only): `GET /internal/indexer/cursor`, `POST /internal/indexer/events`. Require header `X-Edtech-Internal: $INDEXER_INTERNAL_SECRET` (404 without it). Idempotent upserts into `chain_events` + typed sales/royalty/deferred/withdrawal tables; advances `indexer_cursor` after successful writes.
+  * CORS: only `FRONTEND_ORIGIN` + localhost dev origins (`Access-Control-Allow-Credentials` for session cookies). Secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `PRIVY_APP_SECRET`, `INDEXER_INTERNAL_SECRET`. Vars: `PRIVY_APP_ID`, `MARKETPLACE_ADDRESS`, `MONAD_RPC_URL`. Bindings: `PDFS` (R2), `GEN`, `CHAIN`, `SESSIONS`, `PUBLISH_RATE_LIMITS`.
+* **`indexer/`** — Worker `edtech-monad-indexer` (TypeScript, viem). `workers_dev: false`; Cron `* * * * *` follows Monad tip via `eth_getLogs`, decodes TemplateMarketplace events, POSTs batches to api through the `API` service binding. Never talks to Supabase. See [Creator Economy indexer](#creator-economy-indexer) below.
 * **`chain/`** — Worker `edtech-monad-chain` (TypeScript, viem). `workers_dev: false`; reachable only via the API's `CHAIN` binding. Signs `TemplateMarketplace.publishFor` with `RELAYER_PRIVATE_KEY` (secret). Exists because secp256k1 signing in pure Python exceeds Workers Free (~10 ms CPU).
 * **`gen/`** — Worker `edtech-monad-gen` (TypeScript). `workers_dev: false`, so it is reachable only through the API's `GEN` binding (protects the Workers AI quota).
   * `/extract`: R2 PDF → `env.AI.toMarkdown()` → `pages.txt` (UTF-8) + `pages-index.json` (byte offsets) in R2.
@@ -42,7 +48,50 @@ Browser ──► edtech-monad-web  (TanStack Start, Cloudflare Worker with stat
   * Workers Free plan (10 ms CPU/request): the stock adapter streams structured output token by token (~1.9 s CPU → `exceededCpu`), so `gen` uses a tiny adapter subclass that hides `structuredOutputStream`, making TanStack AI use the adapter's non-streaming `structuredOutput` (~45 ms CPU).
   * Flow is synchronous (extract ≈ 10–16 s, generate ≈ 18–28 s for Hefferon). Queues were not used today; they would be the next step for longer jobs.
 * **`web/`** — Worker `edtech-monad-web`, TanStack Start. Never talks to Supabase. Privy lives under `src/lib/privy/` (+ minimal `AuthButton`) so UI rebuilds merge cleanly. Pages: `/` (health), `/templates`, `/upload` (PDF input + loading states; deliberately unstyled, the UI will be rebuilt), `/templates/<id>` (SSR-rendered template; Mermaid rendered client-side only and stubbed out of the Worker bundle).
-* **`supabase/migrations/`** — SQL applied to the project (Day 2: `materials.original_filename/text_r2_key/error`, `templates.content/status/error/generation`; Privy day: `purchases` with unique `tx_hash`).
+* **`supabase/migrations/`** — SQL applied to the project (Day 2: `materials.original_filename/text_r2_key/error`, `templates.content/status/error/generation`; Privy day: `purchases` with unique `tx_hash`; Creator Economy: `chain_events`, `indexer_cursor`, `onchain_templates`, `sales`, `royalty_payments`, `deferred_payments`, `withdrawals`, `license_transfers`, views `creator_balances` / `sales_with_purchase_claims`).
+
+## Creator Economy indexer
+
+Indexes TemplateMarketplace (`0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e`, Monad testnet chain `10143`, deploy block `67913228`) into Supabase for sales, royalties, deferred pull-payments, and withdrawals.
+
+**Semantics (from `_distribute` / `_pay`):** `Purchased` and `RoyaltyPaid` are always emitted; when a push fails, `PaymentDeferred` is emitted in the same tx (before the matching money event) and `pendingWithdrawals[token][to]` grows. `Withdrawn` zeroes it. So `earned = Purchased.creatorAmount + RoyaltyPaid.amount` and `owed = sum(PaymentDeferred) - sum(Withdrawn)` (view `creator_balances.pending`). Buyer-claimed `purchases` (from `POST /purchases/verify`) stay as-is; join to indexer `sales` on `tx_hash` via view `sales_with_purchase_claims`.
+
+**Measured public RPC limits (2026-10-04, `https://testnet-rpc.monad.xyz`):**
+
+| Metric | Value |
+|--------|-------|
+| `eth_getLogs` max block range | **100** (error `-32614`: "eth_getLogs is limited to a 100 range") |
+| Tip growth | **~200 blocks/minute** |
+| Cron + knobs | `* * * * *`, `LOG_RANGE_SIZE=100`, `RANGES_PER_RUN=35` → up to **3500 blocks/run** (under 50 subrequests) |
+
+### Deploy order (Grok Bot after merge)
+
+1. Apply migration `supabase/migrations/20261004300000_creator_economy_indexer.sql` to project edtech-metropolis.
+2. Deploy `api` with secret `INDEXER_INTERNAL_SECRET` (long random; shared with indexer).
+3. Deploy `indexer` with the same `INDEXER_INTERNAL_SECRET`, service binding `API → edtech-monad-api`, Cron enabled.
+4. Optional: run the one-shot backfill (below) to catch up from deploy block faster than Cron alone.
+
+Do **not** put Supabase credentials on the indexer Worker.
+
+### Backfill (local)
+
+```bash
+cd indexer && npm ci
+export INDEXER_INTERNAL_SECRET='same-as-api'
+export API_BASE_URL='https://edtech-monad-api.<account>.workers.dev'   # or http://127.0.0.1:8787
+# optional: START_BLOCK=67913228 END_BLOCK=... DRY_RUN=1
+npm run backfill
+# or: npx tsx backfill.ts
+```
+
+Resumable via `indexer_cursor` (api advances it after each successful batch). `DRY_RUN=1` decodes real logs without writing.
+
+### Tests
+
+```bash
+cd api && uv run pytest tests/test_indexer.py
+cd indexer && npm ci && npm test
+```
 
 ## Privy setup (manual — Juan)
 
@@ -63,8 +112,9 @@ There is **no Privy App ID in the repo yet**. Create one, then wire env vars.
 | `PRIVY_APP_SECRET` | `api` Worker secret / `.dev.vars` | **no** | Privy users API fallback for wallet lookup |
 | `RELAYER_PRIVATE_KEY` | `chain` Worker secret / `.dev.vars` | **no** | EOA that holds `RELAYER_ROLE` on TemplateMarketplace; never commit |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | `api` secrets | **no** | unchanged |
+| `INDEXER_INTERNAL_SECRET` | `api` + `indexer` secrets / `.dev.vars` | **no** | Shared; header `X-Edtech-Internal` for `/internal/indexer/*` |
 | `VITE_API_URL` | `web` | yes | API base URL |
-| `MARKETPLACE_ADDRESS` / `MONAD_RPC_URL` | `api` / `chain` vars | yes | defaults to Monad testnet deployment |
+| `MARKETPLACE_ADDRESS` / `MONAD_RPC_URL` | `api` / `chain` / `indexer` vars | yes | defaults to Monad testnet deployment |
 
 Example (no real secrets):
 
@@ -81,6 +131,9 @@ PRIVY_APP_SECRET=your-privy-app-secret
 
 # chain/.dev.vars
 RELAYER_PRIVATE_KEY=0xYOUR_RELAYER_PRIVATE_KEY_HEX
+
+# api/.dev.vars + indexer/.dev.vars (same value)
+INDEXER_INTERNAL_SECRET=replace-with-long-random-string
 ```
 
 ### JWT verification + CPU

@@ -131,3 +131,33 @@ class Supabase:
     async def insert_purchase(self, row):
         """Insert a verified purchase. Unique tx_hash → 409-style SupabaseError on replay."""
         return await self.insert("purchases", row)
+
+    async def upsert(self, table, rows, *, on_conflict: str, ignore_duplicates: bool = False):
+        """Upsert rows. ignore_duplicates → ON CONFLICT DO NOTHING; else merge."""
+        if not rows:
+            return []
+        resolution = "ignore-duplicates" if ignore_duplicates else "merge-duplicates"
+        return await self.request(
+            "POST",
+            f"{table}?on_conflict={quote(on_conflict)}",
+            body=rows,
+            prefer=f"resolution={resolution},return=representation",
+        )
+
+    async def rpc(self, fn_name: str, payload=None):
+        """Call a PostgREST /rpc function (service role)."""
+        if not self.configured:
+            raise SupabaseNotConfigured()
+        extra = {"Content-Type": "application/json"}
+        body = payload if payload is not None else {}
+        resp = await fetch(
+            f"{self.url}/rest/v1/rpc/{fn_name}",
+            method="POST",
+            headers=self._headers(extra),
+            body=json.dumps(body),
+        )
+        text = await resp.text()
+        data = json.loads(text) if text else None
+        if resp.status >= 400:
+            raise SupabaseError(resp.status, data)
+        return data

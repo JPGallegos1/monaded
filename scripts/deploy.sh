@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy edtech-monad-gen (TS, AI) -> edtech-monad-chain (TS, relayer) -> edtech-monad-api (Python) -> edtech-monad-web.
+# Deploy order: gen → chain → api → indexer → web.
+# Apply Supabase migrations (including creator-economy indexer) BEFORE api/indexer.
 # Requires: CLOUDFLARE_API_TOKEN in env, Node >= 22, uv.
 # Optional: CREDS=/path/to/supabase-credentials.env (default ../supabase-credentials.env)
 set -euo pipefail
@@ -39,11 +40,12 @@ API_URL="$(echo "$API_OUT" | grep -oE 'https://edtech-monad-api\.[a-z0-9-]+\.wor
 : "${API_URL:?could not determine API URL}"
 echo "API_URL=$API_URL"
 
-# 2) Supabase + Privy secrets (values piped via stdin, never printed)
+# 2) Supabase + Privy + indexer secrets (values piped via stdin, never printed)
 if [ -f "$CREDS" ]; then
   get() { grep -E "^$1=" "$CREDS" | head -1 | cut -d= -f2- | tr -d '\r' ; }
   SU="$(get SUPABASE_URL)"; SK="$(get SUPABASE_SERVICE_ROLE_KEY)"
   PA="$(get PRIVY_APP_ID)"; PS="$(get PRIVY_APP_SECRET)"
+  IIS="$(get INDEXER_INTERNAL_SECRET)"
   if [ -n "$SU" ]; then
     printf '%s' "$SU" | uv run pywrangler secret put SUPABASE_URL >/dev/null && echo "SUPABASE_URL secret set."
   else
@@ -59,12 +61,29 @@ if [ -f "$CREDS" ]; then
   else
     echo "PRIVY_APP_SECRET missing in $CREDS — set after creating the Privy app."
   fi
+  if [ -n "${IIS:-}" ]; then
+    printf '%s' "$IIS" | uv run pywrangler secret put INDEXER_INTERNAL_SECRET >/dev/null && echo "INDEXER_INTERNAL_SECRET secret set on api."
+  else
+    echo "INDEXER_INTERNAL_SECRET missing in $CREDS — generate one and set on api + indexer before enabling cron ingest."
+  fi
   if [ -n "${PA:-}" ]; then
     # App ID is a public var (also baked into the web bundle as VITE_PRIVY_APP_ID)
     uv run pywrangler deploy ${WEB_ORIGIN:+--var FRONTEND_ORIGIN:$WEB_ORIGIN} --var "PRIVY_APP_ID:$PA" >/dev/null \
       && echo "PRIVY_APP_ID var set."
   fi
-  unset SU SK PA PS
+  unset SU SK PA PS IIS
+fi
+
+# 2b) Indexer Worker (Cron → API service binding). Deploy AFTER api exists.
+(cd "$ROOT/indexer" && npm ci --silent && npx wrangler deploy)
+if [ -f "$CREDS" ]; then
+  get() { grep -E "^$1=" "$CREDS" | head -1 | cut -d= -f2- | tr -d '\r' ; }
+  IIS="$(get INDEXER_INTERNAL_SECRET)"
+  if [ -n "${IIS:-}" ]; then
+    (cd "$ROOT/indexer" && printf '%s' "$IIS" | npx wrangler secret put INDEXER_INTERNAL_SECRET >/dev/null \
+      && echo "INDEXER_INTERNAL_SECRET secret set on indexer.")
+  fi
+  unset IIS
 fi
 
 # 3) Build + deploy web with the API URL baked in

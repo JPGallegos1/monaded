@@ -38,7 +38,8 @@
 		"MONAD_CHAIN_ID": "10143"
 	}
 	// Secrets (set with `uv run pywrangler secret put NAME`, never committed):
-	//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PRIVY_APP_SECRET
+	//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PRIVY_APP_SECRET, INDEXER_INTERNAL_SECRET
 	// Relayer key lives on edtech-monad-chain only: RELAYER_PRIVATE_KEY
+	// INDEXER_INTERNAL_SECRET must match edtech-monad-indexer (X-Edtech-Internal header).
 	// Local dev: put them in api/.dev.vars (gitignored).
 }

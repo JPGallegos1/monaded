@@ -18,6 +18,12 @@ Routes:
   POST /materials/{id}/templates   -> JSON {start_page?, end_page?, learning_style?}
                                       -> AI study template via the gen Worker, saved to `templates`
 
+  GET  /me/earnings                -> creator dashboard totals + recent sales/royalties (session; native MON)
+
+Internal (indexer / backfill only — require X-Edtech-Internal == INDEXER_INTERNAL_SECRET):
+  GET  /internal/indexer/cursor    -> {cursor: {chain_id, contract, last_block}}
+  POST /internal/indexer/events    -> idempotent upsert of decoded logs + advance cursor
+
 Content gating: non-owners see preview only. Full content requires material ownership or
 onchain hasLicense for the session wallet. Never call updateTemplate from this Worker.
 
@@ -26,6 +32,8 @@ touches Supabase: this Worker remains the only component that reads/writes the d
 
 Privy session state lives in the SessionDO Durable Object (userId + wallet only — never raw tokens).
 On-chain publishFor is signed by edtech-monad-chain (CHAIN binding) with RELAYER_PRIVATE_KEY.
+The indexer Worker posts decoded TemplateMarketplace logs via the internal routes above;
+it never talks to Supabase directly.
 """
 
 import json
@@ -73,6 +81,17 @@ from session_do import SessionDO  # noqa: F401 — exported for wrangler DO bind
 from supabase_rest import Supabase, SupabaseError, SupabaseNotConfigured
 from license_check import has_license, public_template_view
 from fork import ForkError, build_fork_rows
+from indexer import (
+    DEFAULT_CHAIN_ID,
+    DEFAULT_CONTRACT,
+    IndexerError,
+    assert_allowed_scope,
+    get_cursor,
+    ingest_events,
+    parse_ingest_payload,
+    require_internal,
+)
+from earnings import get_earnings_for_wallet
 
 DEV_ORIGINS = {
     "http://localhost:3000",
@@ -176,8 +195,14 @@ class Default(WorkerEntrypoint):
                 return await self.get_auth_session(request)
             if path == "/auth/logout" and method == "POST":
                 return await self.logout(request)
+            if path == "/me/earnings" and method == "GET":
+                return await self.me_earnings(request)
             if path == "/purchases/verify" and method == "POST":
                 return await self.verify_purchase(request)
+            if path == "/internal/indexer/cursor" and method == "GET":
+                return await self.indexer_cursor(request)
+            if path == "/internal/indexer/events" and method == "POST":
+                return await self.indexer_events(request)
             if path == "/materials" and method == "POST":
                 return await self.upload_material(request)
             m = re.fullmatch(rf"/templates/({UUID_RE})", path)
@@ -202,7 +227,16 @@ class Default(WorkerEntrypoint):
                 if sub == "/templates" and method == "POST":
                     return await self.generate_template(request, mid)
                 return self._json(request, {"error": "method not allowed"}, 405)
-            if path in ("/health", "/templates", "/users", "/materials", "/auth/session", "/auth/logout", "/purchases/verify"):
+            if path in (
+                "/health",
+                "/templates",
+                "/users",
+                "/materials",
+                "/auth/session",
+                "/auth/logout",
+                "/me/earnings",
+                "/purchases/verify",
+            ):
                 return self._json(request, {"error": "method not allowed"}, 405)
             return self._json(request, {"error": "not found"}, 404)
         except HttpError as e:
@@ -219,6 +253,8 @@ class Default(WorkerEntrypoint):
         except OwnershipError as e:
             return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except ForkError as e:
+            return self._json(request, {"error": e.message, "code": e.code}, e.status)
+        except IndexerError as e:
             return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except PublishError as e:
             if e.status is not None:
@@ -396,8 +432,65 @@ class Default(WorkerEntrypoint):
         cookie = session_cookie_header("", 0, clear=True)
         return self._json(request, {"ok": True}, set_cookie=cookie)
 
+    # ---- Creator earnings (session wallet only) ---------------------------
+    async def me_earnings(self, request):
+        """Native-MON creator totals + recent sales/royalties for the session wallet."""
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            return self._json(request, {"error": str(e)}, 401)
+        wallet = session.get("walletAddress") or session.get("wallet_address")
+        if not isinstance(wallet, str) or not wallet.strip():
+            return self._json(request, {"error": "not authenticated"}, 401)
+        # Never take wallet from query/body — session only.
+        sb = Supabase(self.env)
+        payload = await get_earnings_for_wallet(sb, wallet)
+        return self._json(request, payload)
+
+    # ---- Internal indexer (service binding / backfill only) ---------------
+    async def indexer_cursor(self, request):
+        require_internal(self.env, request)
+        qs = urlparse(request.url).query
+        params = {}
+        if qs:
+            for part in qs.split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    params[k] = v
+        chain_id, contract = assert_allowed_scope(
+            chain_id=params.get("chain_id", DEFAULT_CHAIN_ID),
+            contract=params.get("contract", DEFAULT_CONTRACT),
+        )
+        sb = Supabase(self.env)
+        cursor = await get_cursor(sb, chain_id=chain_id, contract=contract)
+        return self._json(request, {"ok": True, "cursor": cursor})
+
+    async def indexer_events(self, request):
+        require_internal(self.env, request)
+        body = await self._json_body(request)
+        chain_id, contract, from_block, to_block, events, advance = parse_ingest_payload(body)
+        sb = Supabase(self.env)
+        result = await ingest_events(
+            sb,
+            chain_id=chain_id,
+            contract=contract,
+            from_block=from_block,
+            to_block=to_block,
+            events=events,
+            advance=advance,
+        )
+        log(
+            "indexer_ingest",
+            from_block=from_block,
+            to_block=to_block,
+            events=result.get("events"),
+            upserted=result.get("upserted"),
+        )
+        return self._json(request, result)
+
     # ---- Purchases --------------------------------------------------------
     async def verify_purchase(self, request):
+
         try:
             session = await require_session(self.env, request)
         except ValueError as e:
