@@ -2,8 +2,10 @@
 
 Routes:
   GET  /health                     -> {"ok": true, "supabase": {...}, "gen": {...}, "privy": {...}}
-  GET  /templates                  -> {"templates": [...published templates...]}
-  GET  /templates/{id}             -> {"template": {...}} (any status; includes generated content)
+  GET  /templates                  -> {"templates": [...published templates...]} (preview content only)
+  GET  /templates/{id}             -> {"template": {...}} preview for public; full content for owner
+  GET  /templates/{id}/content     -> full content (session; owner or onchain hasLicense)
+  POST /templates/{id}/fork        -> create draft fork with parent_template_id (session + license/owner)
   POST /users                      -> upsert a user by privy_user_id (legacy; prefer session)
   POST /auth/session               -> exchange Privy access (+ identity) token for HttpOnly session cookie
   GET  /auth/session               -> current session {userId, walletAddress} (from cookie)
@@ -15,6 +17,9 @@ Routes:
   POST /materials/{id}/extract     -> PDF text extraction via the gen Worker (Workers AI toMarkdown)
   POST /materials/{id}/templates   -> JSON {start_page?, end_page?, learning_style?}
                                       -> AI study template via the gen Worker, saved to `templates`
+
+Content gating: non-owners see preview only. Full content requires material ownership or
+onchain hasLicense for the session wallet. Never call updateTemplate from this Worker.
 
 The gen Worker (TypeScript, TanStack AI) is reached through the `GEN` service binding and never
 touches Supabase: this Worker remains the only component that reads/writes the database.
@@ -62,6 +67,8 @@ from session import (
 )
 from session_do import SessionDO  # noqa: F401 — exported for wrangler DO binding
 from supabase_rest import Supabase, SupabaseError, SupabaseNotConfigured
+from license_check import has_license, public_template_view
+from fork import ForkError, build_fork_rows
 
 DEV_ORIGINS = {
     "http://localhost:3000",
@@ -172,6 +179,12 @@ class Default(WorkerEntrypoint):
             m = re.fullmatch(rf"/templates/({UUID_RE})", path)
             if m and method == "GET":
                 return await self.get_template(request, m.group(1))
+            m = re.fullmatch(rf"/templates/({UUID_RE})/content", path)
+            if m and method == "GET":
+                return await self.get_template_content(request, m.group(1))
+            m = re.fullmatch(rf"/templates/({UUID_RE})/fork", path)
+            if m and method == "POST":
+                return await self.fork_template(request, m.group(1))
             m = re.fullmatch(rf"/templates/({UUID_RE})/publish", path)
             if m and method == "POST":
                 return await self.publish_template(request, m.group(1))
@@ -200,6 +213,8 @@ class Default(WorkerEntrypoint):
                 status = 404
             return self._json(request, {"error": e.message, "code": e.code}, status)
         except OwnershipError as e:
+            return self._json(request, {"error": e.message, "code": e.code}, e.status)
+        except ForkError as e:
             return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except PublishError as e:
             status = 429 if e.code == "rate_limited" else 400
@@ -257,7 +272,9 @@ class Default(WorkerEntrypoint):
 
     async def templates(self, request):
         rows = await Supabase(self.env).list_published_templates()
-        return self._json(request, {"templates": rows or []})
+        # Catalog is public — never ship full study content in the list.
+        preview_rows = [public_template_view(r, include_full_content=False) for r in (rows or [])]
+        return self._json(request, {"templates": preview_rows})
 
     async def upsert_user(self, request):
         """Update profile fields for the authenticated session user only."""
@@ -716,11 +733,120 @@ class Default(WorkerEntrypoint):
         log("template_generated", template_id=tpl["id"], material_id=material_id, ms=generation["api_total_ms"])
         return self._json(request, {"template": row}, 201)
 
+    async def _optional_session(self, request):
+        try:
+            return await require_session(self.env, request)
+        except ValueError:
+            return None
+
+    async def _is_template_owner(self, sb: Supabase, template: dict, session: dict | None) -> bool:
+        if not session or not template:
+            return False
+        material = None
+        if template.get("material_id"):
+            material = await sb.get("materials", template["material_id"])
+        user_row = await sb.get_by("users", "privy_user_id", session["userId"])
+        owner_user_id = user_row["id"] if user_row else None
+        material_owner = material.get("owner_id") if material else None
+        return bool(owner_user_id and material_owner and str(material_owner) == str(owner_user_id))
+
+    async def _session_has_license(self, template: dict, session: dict | None) -> bool:
+        if not session:
+            return False
+        raw = template.get("onchain_token_id")
+        if raw is None or str(raw).strip() == "":
+            return False
+        try:
+            onchain_id = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return False
+        marketplace = _env_str(self.env, "MARKETPLACE_ADDRESS", "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e")
+        rpc_url = _env_str(self.env, "MONAD_RPC_URL", "https://testnet-rpc.monad.xyz")
+        try:
+            return await has_license(
+                account=session["walletAddress"],
+                template_id=onchain_id,
+                marketplace=marketplace,
+                rpc_url=rpc_url,
+            )
+        except Exception as e:  # noqa: BLE001
+            log("has_license_error", error=repr(e), template_id=template.get("id"))
+            return False
+
     async def get_template(self, request, template_id):
-        row = await Supabase(self.env).get("templates", template_id)
+        sb = Supabase(self.env)
+        row = await sb.get("templates", template_id)
         if not row:
             raise HttpError(404, "template not found")
-        return self._json(request, {"template": row})
+        session = await self._optional_session(request)
+        is_owner = await self._is_template_owner(sb, row, session)
+        # Unpublished drafts: owner only (full content). Everyone else: 404.
+        if row.get("is_published") is not True and not is_owner:
+            raise HttpError(404, "template not found")
+        if is_owner:
+            return self._json(request, {"template": public_template_view(row, include_full_content=True)})
+        # Published non-owners get preview here; full content via /content after license check.
+        return self._json(request, {"template": public_template_view(row, include_full_content=False)})
+
+    async def get_template_content(self, request, template_id):
+        """Full content for creator (material owner) or wallet holding an onchain license."""
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            raise HttpError(401, str(e))
+        sb = Supabase(self.env)
+        row = await sb.get("templates", template_id)
+        if not row:
+            raise HttpError(404, "template not found")
+        is_owner = await self._is_template_owner(sb, row, session)
+        if is_owner:
+            return self._json(
+                request,
+                {"template": public_template_view(row, include_full_content=True), "access": "owner"},
+            )
+        licensed = await self._session_has_license(row, session)
+        if licensed:
+            return self._json(
+                request,
+                {"template": public_template_view(row, include_full_content=True), "access": "license"},
+            )
+        raise HttpError(403, "license or ownership required", code="forbidden")
+
+    async def fork_template(self, request, template_id):
+        """Create a draft fork with parent_template_id for later publish."""
+        try:
+            session = await require_session(self.env, request)
+        except ValueError as e:
+            raise HttpError(401, str(e))
+        body = await self._json_body(request)
+        title = body.get("title") if isinstance(body.get("title"), str) else None
+
+        sb = Supabase(self.env)
+        parent = await sb.get("templates", template_id)
+        if not parent:
+            raise ForkError("parent template not found", code="not_found", status=404)
+
+        is_owner = await self._is_template_owner(sb, parent, session)
+        licensed = await self._session_has_license(parent, session)
+        if not is_owner and not licensed:
+            raise ForkError("license or ownership required to fork", code="forbidden", status=403)
+
+        user_row = await sb.get_by("users", "privy_user_id", session["userId"])
+        if not user_row:
+            user_row = await sb.upsert_user(
+                {"privy_user_id": session["userId"], "wallet_address": session["walletAddress"]}
+            )
+            if isinstance(user_row, list):
+                user_row = user_row[0] if user_row else None
+        owner_user_id = user_row["id"] if user_row else None
+
+        material_row, template_row = build_fork_rows(
+            parent=parent, owner_user_id=owner_user_id, title=title
+        )
+        await sb.insert("materials", material_row)
+        row = await sb.insert("templates", template_row)
+        log("template_forked", template_id=row["id"], parent_id=template_id, user=session["userId"])
+        return self._json(request, {"template": row}, 201)
 
 
 # Re-export DO classes at module level for Wrangler durable_objects.class_name
