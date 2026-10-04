@@ -342,6 +342,24 @@ def test_resolve_parent_id_rejects_unpublished_parent():
     assert ei.value.code == "bad_parent"
 
 
+def test_resolve_parent_id_rejects_zero_onchain_token():
+    """onchain ids start at 1; token 0 must not publish the fork as a root."""
+    with pytest.raises(PublishError) as ei:
+        resolve_parent_onchain_id(
+            template={"parent_template_id": "p"},
+            parent={"id": "p", "onchain_token_id": "0"},
+        )
+    assert ei.value.code == "bad_parent"
+    assert "not published on-chain" in ei.value.message
+
+    with pytest.raises(PublishError) as ei:
+        resolve_parent_onchain_id(
+            template={"parent_template_id": "p"},
+            parent={"id": "p", "onchain_token_id": -1},
+        )
+    assert ei.value.code == "bad_parent"
+
+
 def test_resolve_parent_id_ignores_invented_body_lineage():
     """Body parent_id is never an input to resolve_parent_onchain_id — DB wins."""
     tpl = {"id": "fork", "parent_template_id": "parent-uuid"}

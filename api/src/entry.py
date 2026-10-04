@@ -531,7 +531,12 @@ class Default(WorkerEntrypoint):
             )
             return self._json(
                 request,
-                {"ok": True, "template": row, "tx": receipt, "reconciled": True},
+                {
+                    "ok": True,
+                    "template": public_template_view(row, include_full_content=True),
+                    "tx": receipt,
+                    "reconciled": True,
+                },
             )
         if prior is not None and prior.get("templateId") and not prior.get("txHash"):
             # Token known without hash (legacy) — finalize without re-broadcast.
@@ -543,7 +548,12 @@ class Default(WorkerEntrypoint):
             row = await sb.update("templates", template_uuid, patch)
             return self._json(
                 request,
-                {"ok": True, "template": row, "tx": prior, "reconciled": True},
+                {
+                    "ok": True,
+                    "template": public_template_view(row, include_full_content=True),
+                    "tx": prior,
+                    "reconciled": True,
+                },
             )
 
         # Atomic claim before chain/: only the winner may send.
@@ -613,7 +623,14 @@ class Default(WorkerEntrypoint):
             ) from e
 
         log("template_published", template_id=template_uuid, tx=tx_hash, creator=creator)
-        return self._json(request, {"ok": True, "template": row, "tx": receipt})
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "template": public_template_view(row, include_full_content=True),
+                "tx": receipt,
+            },
+        )
 
     # ---- gen Worker (service binding) --------------------------------------
     async def _gen(self, method, path, payload=None):
@@ -875,14 +892,27 @@ class Default(WorkerEntrypoint):
             )
         licensed = await self._session_has_license(row, session)
         if licensed:
+            # Buyers get full study content, but only the public generation slice
+            # (full generation may echo source material).
             return self._json(
                 request,
-                {"template": public_template_view(row, include_full_content=True), "access": "license"},
+                {
+                    "template": public_template_view(
+                        row,
+                        include_full_content=True,
+                        include_full_generation=False,
+                    ),
+                    "access": "license",
+                },
             )
         raise HttpError(403, "license or ownership required", code="forbidden")
 
     async def fork_template(self, request, template_id):
-        """Create a draft fork with parent_template_id for later publish."""
+        """Create a draft fork with parent_template_id for later publish.
+
+        Uses the same per-user + global publish rate limits (each fork inserts a
+        material + template row).
+        """
         try:
             session = await require_session(self.env, request)
         except ValueError as e:
@@ -909,13 +939,20 @@ class Default(WorkerEntrypoint):
                 user_row = user_row[0] if user_row else None
         owner_user_id = user_row["id"] if user_row else None
 
+        # Same caps as publish — forks create durable rows and feed publishFor.
+        await self._check_publish_rate_limits(session["userId"])
+
         material_row, template_row = build_fork_rows(
             parent=parent, owner_user_id=owner_user_id, title=title
         )
         await sb.insert("materials", material_row)
         row = await sb.insert("templates", template_row)
         log("template_forked", template_id=row["id"], parent_id=template_id, user=session["userId"])
-        return self._json(request, {"template": row}, 201)
+        return self._json(
+            request,
+            {"template": public_template_view(row, include_full_content=True)},
+            201,
+        )
 
 
 # Re-export DO classes at module level for Wrangler durable_objects.class_name

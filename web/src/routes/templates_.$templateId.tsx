@@ -38,7 +38,8 @@ function TemplateView() {
   const onchain = useOnchainTemplate(onchainId, walletAddress)
   const gated = useGatedContent(t)
   const c = gated.content
-  const g = t.generation
+  // Prefer gated generation (license → public slice; owner → full) over loader preview.
+  const g = gated.generation ?? t.generation
   const published = Boolean(t.is_published) || Boolean(onchainId)
 
   return (
