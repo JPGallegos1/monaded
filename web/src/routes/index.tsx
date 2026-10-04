@@ -23,7 +23,11 @@ function Home() {
           Learning materials and remixable templates. This is the MVP skeleton.
         </p>
         <Link to="/templates" className="nav-link">
-          Browse templates →
+          Browse marketplace →
+        </Link>
+        {' · '}
+        <Link to="/library" className="nav-link">
+          Library →
         </Link>
       </section>
 

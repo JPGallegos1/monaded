@@ -29,7 +29,14 @@ export default function Header() {
             className="nav-link"
             activeProps={{ className: 'nav-link is-active' }}
           >
-            Templates
+            Marketplace
+          </Link>
+          <Link
+            to="/library"
+            className="nav-link"
+            activeProps={{ className: 'nav-link is-active' }}
+          >
+            Library
           </Link>
           <Link
             to="/upload"

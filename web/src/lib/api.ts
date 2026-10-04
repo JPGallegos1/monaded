@@ -14,11 +14,15 @@ export type Health = {
 export type Template = {
   id: string
   title: string
+  description?: string | null
   author_id?: string | null
   price_usd?: number | null
   price_mon?: number | null
   royalty_bps?: number | null
   parent_template_id?: string | null
+  onchain_token_id?: string | number | null
+  is_published?: boolean | null
+  publish_tx_hash?: string | null
   created_at?: string
   [key: string]: unknown
 }
