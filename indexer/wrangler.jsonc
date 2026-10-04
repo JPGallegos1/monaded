@@ -1,0 +1,38 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  // Creator Economy indexer: Cron polls Monad testnet eth_getLogs for TemplateMarketplace,
+  // decodes events with viem, posts batches to edtech-monad-api via service binding.
+  // workers_dev: false — not publicly reachable. Cron + API binding only.
+  // Measured (2026-10-04): public RPC eth_getLogs max range = 100 blocks;
+  // Monad testnet ≈ 200 blocks/min. With RANGE=100 and 35 ranges/run under the
+  // Free-plan 50-subrequest cap, each minute advances ~3500 blocks (> tip growth).
+  "name": "edtech-monad-indexer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "services": [
+    { "binding": "API", "service": "edtech-monad-api" }
+  ],
+  "vars": {
+    "MARKETPLACE_ADDRESS": "0xC8c9Cd5A19b4FC27B209AdF75eDA442C798Ab59e",
+    "MONAD_RPC_URL": "https://testnet-rpc.monad.xyz",
+    "MONAD_CHAIN_ID": "10143",
+    // Inclusive block span per eth_getLogs (RPC hard-caps at 100).
+    "LOG_RANGE_SIZE": "100",
+    // Ranges per cron invocation. Budget: 1 tip + 1 cursor GET + N getLogs
+    // + ≤8 getBlock (event blocks only) + 1 events POST ≤ 50 subrequests.
+    "RANGES_PER_RUN": "35",
+    "DEPLOY_BLOCK": "67913228"
+  }
+  // Secrets (never commit): INDEXER_INTERNAL_SECRET
+  // Must match api Worker's INDEXER_INTERNAL_SECRET (X-Edtech-Internal).
+  // Local: indexer/.dev.vars
+}

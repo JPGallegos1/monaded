@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local wrangler dev / backfill against a running API.
+# Must match api/.dev.vars INDEXER_INTERNAL_SECRET. Never commit real values.
+INDEXER_INTERNAL_SECRET=replace-with-long-random-string

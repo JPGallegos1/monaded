@@ -18,6 +18,10 @@ Routes:
   POST /materials/{id}/templates   -> JSON {start_page?, end_page?, learning_style?}
                                       -> AI study template via the gen Worker, saved to `templates`
 
+Internal (indexer / backfill only — require X-Edtech-Internal == INDEXER_INTERNAL_SECRET):
+  GET  /internal/indexer/cursor    -> {cursor: {chain_id, contract, last_block}}
+  POST /internal/indexer/events    -> idempotent upsert of decoded logs + advance cursor
+
 Content gating: non-owners see preview only. Full content requires material ownership or
 onchain hasLicense for the session wallet. Never call updateTemplate from this Worker.
 
@@ -26,6 +30,8 @@ touches Supabase: this Worker remains the only component that reads/writes the d
 
 Privy session state lives in the SessionDO Durable Object (userId + wallet only — never raw tokens).
 On-chain publishFor is signed by edtech-monad-chain (CHAIN binding) with RELAYER_PRIVATE_KEY.
+The indexer Worker posts decoded TemplateMarketplace logs via the internal routes above;
+it never talks to Supabase directly.
 """
 
 import json
@@ -73,6 +79,15 @@ from session_do import SessionDO  # noqa: F401 — exported for wrangler DO bind
 from supabase_rest import Supabase, SupabaseError, SupabaseNotConfigured
 from license_check import has_license, public_template_view
 from fork import ForkError, build_fork_rows
+from indexer import (
+    DEFAULT_CHAIN_ID,
+    DEFAULT_CONTRACT,
+    IndexerError,
+    get_cursor,
+    ingest_events,
+    norm_contract,
+    require_internal,
+)
 
 DEV_ORIGINS = {
     "http://localhost:3000",
@@ -178,6 +193,10 @@ class Default(WorkerEntrypoint):
                 return await self.logout(request)
             if path == "/purchases/verify" and method == "POST":
                 return await self.verify_purchase(request)
+            if path == "/internal/indexer/cursor" and method == "GET":
+                return await self.indexer_cursor(request)
+            if path == "/internal/indexer/events" and method == "POST":
+                return await self.indexer_events(request)
             if path == "/materials" and method == "POST":
                 return await self.upload_material(request)
             m = re.fullmatch(rf"/templates/({UUID_RE})", path)
@@ -219,6 +238,8 @@ class Default(WorkerEntrypoint):
         except OwnershipError as e:
             return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except ForkError as e:
+            return self._json(request, {"error": e.message, "code": e.code}, e.status)
+        except IndexerError as e:
             return self._json(request, {"error": e.message, "code": e.code}, e.status)
         except PublishError as e:
             if e.status is not None:
@@ -396,8 +417,58 @@ class Default(WorkerEntrypoint):
         cookie = session_cookie_header("", 0, clear=True)
         return self._json(request, {"ok": True}, set_cookie=cookie)
 
+    # ---- Internal indexer (service binding / backfill only) ---------------
+    async def indexer_cursor(self, request):
+        require_internal(self.env, request)
+        qs = urlparse(request.url).query
+        params = {}
+        if qs:
+            for part in qs.split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    params[k] = v
+        chain_id = int(params.get("chain_id") or DEFAULT_CHAIN_ID)
+        contract = norm_contract(params.get("contract") or DEFAULT_CONTRACT)
+        sb = Supabase(self.env)
+        cursor = await get_cursor(sb, chain_id=chain_id, contract=contract)
+        return self._json(request, {"ok": True, "cursor": cursor})
+
+    async def indexer_events(self, request):
+        require_internal(self.env, request)
+        body = await self._json_body(request)
+        chain_id = int(body.get("chain_id") or DEFAULT_CHAIN_ID)
+        contract = norm_contract(body.get("contract") or DEFAULT_CONTRACT)
+        try:
+            from_block = int(body["from_block"])
+            to_block = int(body["to_block"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise IndexerError("from_block and to_block required", code="bad_range") from e
+        events = body.get("events") or []
+        advance = body.get("advance_cursor", True)
+        if not isinstance(advance, bool):
+            advance = bool(advance)
+        sb = Supabase(self.env)
+        result = await ingest_events(
+            sb,
+            chain_id=chain_id,
+            contract=contract,
+            from_block=from_block,
+            to_block=to_block,
+            events=events if isinstance(events, list) else [],
+            advance=advance,
+        )
+        log(
+            "indexer_ingest",
+            from_block=from_block,
+            to_block=to_block,
+            events=result.get("events"),
+            upserted=result.get("upserted"),
+        )
+        return self._json(request, result)
+
     # ---- Purchases --------------------------------------------------------
     async def verify_purchase(self, request):
+
         try:
             session = await require_session(self.env, request)
         except ValueError as e:
