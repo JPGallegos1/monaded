@@ -5,8 +5,13 @@
  * Why a TS Worker: secp256k1 signing in pure Python exceeds Workers Free
  * (~10 ms CPU). viem runs in the V8 isolate with acceptable CPU.
  *
- * RelayerDO: single-flight coordinator so concurrent publishFor calls cannot
+ * RelayerDO: single-flight coordinator so concurrent publishFor *sends* cannot
  * collide on the same EOA nonce (see contracts/README.md).
+ *
+ * Endpoints:
+ *   POST /publishFor/send    — sign+broadcast; returns {txHash} immediately
+ *   POST /publishFor/receipt — wait for receipt of a prior txHash; parse event
+ *   POST /publishFor         — send then receipt (legacy convenience)
  *
  * Secrets: RELAYER_PRIVATE_KEY
  * Vars: MARKETPLACE_ADDRESS, MONAD_RPC_URL, MONAD_CHAIN_ID
@@ -75,6 +80,10 @@ type PublishBody = {
   uri?: string
 }
 
+type ReceiptBody = {
+  txHash?: string
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -106,15 +115,7 @@ function validatePublishBody(body: PublishBody): Response | null {
   return null
 }
 
-async function executePublishFor(env: Env, body: PublishBody): Promise<Response> {
-  if (!env.RELAYER_PRIVATE_KEY) {
-    return json({ error: 'RELAYER_PRIVATE_KEY not configured' }, 503)
-  }
-  const creator = body.creator as Address
-  const uri = body.uri as string
-  const priceWei = BigInt(body.priceWei ?? 0)
-  const parentId = BigInt(body.parentId ?? 0)
-
+function makeClient(env: Env) {
   const pk = env.RELAYER_PRIVATE_KEY.startsWith('0x')
     ? (env.RELAYER_PRIVATE_KEY as Hex)
     : (`0x${env.RELAYER_PRIVATE_KEY}` as Hex)
@@ -127,6 +128,19 @@ async function executePublishFor(env: Env, body: PublishBody): Promise<Response>
     chain: monadTestnet,
     transport: http(rpc),
   }).extend(publicActions)
+  return { account, marketplace, client }
+}
+
+/** Sign + broadcast only. Returns the tx hash immediately (no receipt wait). */
+async function sendPublishFor(env: Env, body: PublishBody): Promise<Response> {
+  if (!env.RELAYER_PRIVATE_KEY) {
+    return json({ error: 'RELAYER_PRIVATE_KEY not configured' }, 503)
+  }
+  const creator = body.creator as Address
+  const uri = body.uri as string
+  const priceWei = BigInt(body.priceWei ?? 0)
+  const parentId = BigInt(body.parentId ?? 0)
+  const { account, marketplace, client } = makeClient(env)
 
   const hash = await client.writeContract({
     address: marketplace,
@@ -137,11 +151,27 @@ async function executePublishFor(env: Env, body: PublishBody): Promise<Response>
     chain: monadTestnet,
   })
 
-  const receipt = await client.waitForTransactionReceipt({ hash })
-  // Viem receipts are 'success' | 'reverted' — never treat a revert as published.
+  return json({ txHash: hash, relayer: account.address }, 200)
+}
+
+/** Wait for a previously sent tx and parse TemplatePublished. */
+async function waitPublishReceipt(env: Env, txHash: Hex): Promise<Response> {
+  if (!env.RELAYER_PRIVATE_KEY) {
+    return json({ error: 'RELAYER_PRIVATE_KEY not configured' }, 503)
+  }
+  const { account, client } = makeClient(env)
+
+  let receipt
+  try {
+    receipt = await client.waitForTransactionReceipt({ hash: txHash })
+  } catch (e) {
+    console.error('waitForTransactionReceipt failed', { txHash, error: String(e) })
+    return json({ error: 'receipt unavailable', code: 'pending', txHash }, 404)
+  }
+
   if (receipt.status !== 'success') {
-    console.error('publishFor reverted', { hash, status: receipt.status })
-    return json({ error: 'publish transaction reverted', txHash: hash }, 502)
+    console.error('publishFor reverted', { hash: txHash, status: receipt.status })
+    return json({ error: 'publish transaction reverted', code: 'reverted', txHash }, 502)
   }
 
   let templateId: string | undefined
@@ -158,19 +188,21 @@ async function executePublishFor(env: Env, body: PublishBody): Promise<Response>
     console.error('TemplatePublished parse failed', parseErr)
   }
 
-  return json({ txHash: hash, relayer: account.address, templateId }, 200)
+  return json({ txHash, relayer: account.address, templateId }, 200)
 }
 
 /**
- * Single Durable Object instance serializes all relayer writes.
- * blockConcurrencyWhile keeps the input gate closed across RPC awaits so two
+ * Single Durable Object instance serializes all relayer *writes*.
+ * blockConcurrencyWhile keeps the input gate closed across the send so two
  * publishFor calls cannot prepare the same EOA nonce concurrently.
+ * Receipt waits do NOT hold this lock (nonce already consumed after send).
  */
 export class RelayerDO extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.method !== 'POST') {
       return json({ error: 'method not allowed' }, 405)
     }
+    const url = new URL(request.url)
     let body: PublishBody
     try {
       body = (await request.json()) as PublishBody
@@ -181,9 +213,13 @@ export class RelayerDO extends DurableObject<Env> {
     if (invalid) return invalid
 
     try {
-      return await this.ctx.blockConcurrencyWhile(() => executePublishFor(this.env, body))
+      // Only the send path needs the concurrency lock.
+      if (url.pathname.endsWith('/receipt')) {
+        return json({ error: 'use /publishFor/receipt on the worker' }, 400)
+      }
+      return await this.ctx.blockConcurrencyWhile(() => sendPublishFor(this.env, body))
     } catch (e) {
-      console.error('publishFor failed', e)
+      console.error('publishFor send failed', e)
       return json({ error: 'publish transaction failed' }, 502)
     }
   }
@@ -195,7 +231,30 @@ export default {
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({ ok: true, service: 'edtech-monad-chain' })
     }
-    if (request.method === 'POST' && url.pathname === '/publishFor') {
+
+    if (request.method === 'POST' && url.pathname === '/publishFor/receipt') {
+      let body: ReceiptBody
+      try {
+        body = (await request.json()) as ReceiptBody
+      } catch {
+        return json({ error: 'invalid JSON body' }, 400)
+      }
+      const txHash = body.txHash
+      if (!txHash || typeof txHash !== 'string' || !txHash.startsWith('0x')) {
+        return json({ error: 'txHash required' }, 400)
+      }
+      try {
+        return await waitPublishReceipt(env, txHash as Hex)
+      } catch (e) {
+        console.error('publishFor receipt failed', e)
+        return json({ error: 'publish receipt failed', txHash }, 502)
+      }
+    }
+
+    if (
+      request.method === 'POST' &&
+      (url.pathname === '/publishFor/send' || url.pathname === '/publishFor')
+    ) {
       let body: PublishBody
       try {
         body = (await request.json()) as PublishBody
@@ -209,14 +268,25 @@ export default {
       }
       // Route every write through one RelayerDO so nonces stay serialized.
       const stub = env.RELAYER.get(env.RELAYER.idFromName('relayer'))
-      return stub.fetch(
-        new Request('https://relayer.internal/publishFor', {
+      const sendResp = await stub.fetch(
+        new Request('https://relayer.internal/publishFor/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }),
       )
+      // Legacy /publishFor: send then receipt in one HTTP call (API prefers split).
+      if (url.pathname === '/publishFor/send') {
+        return sendResp
+      }
+      if (!sendResp.ok) return sendResp
+      const sent = (await sendResp.json()) as { txHash?: string }
+      if (!sent.txHash) {
+        return json({ error: 'chain worker missing txHash' }, 502)
+      }
+      return waitPublishReceipt(env, sent.txHash as Hex)
     }
+
     return json({ error: 'not found' }, 404)
   },
 }
