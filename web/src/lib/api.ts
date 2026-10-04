@@ -11,6 +11,11 @@ export type Health = {
   supabase: { configured: boolean; reachable: boolean; status?: number; error?: string }
 }
 
+/** Title-only section ref from public GET /templates/{id} (locked detail outline). */
+export type PublicSectionRef = {
+  title: string | null
+}
+
 export type Template = {
   id: string
   title: string
@@ -24,6 +29,12 @@ export type Template = {
   is_published?: boolean | null
   publish_tx_hash?: string | null
   created_at?: string
+  /**
+   * Public detail only (GET /templates/{id} for non-owners). Not on catalog list.
+   * Fresh allowlisted `{ title }` objects — never section bodies.
+   */
+  section_count?: number
+  sections?: PublicSectionRef[]
   [key: string]: unknown
 }
 

@@ -5,12 +5,26 @@ import {
   type GeneratedTemplate,
   type StudyTemplateContent,
 } from '../api'
+import type { PublicSectionOutline, PublicSectionRef } from '../types'
 
 export type TemplatePreview = {
   title?: string | null
   description?: string | null
   summary?: string | null
   learning_objectives?: string[]
+  /** Title-only outline from public detail (for locked section UI). */
+  sections?: PublicSectionRef[]
+  section_count?: number
+}
+
+export function getPublicSectionOutline(
+  template: GeneratedTemplate | null | undefined,
+): PublicSectionOutline | null {
+  if (!template) return null
+  const sections = template.sections
+  const count = template.section_count
+  if (!Array.isArray(sections) || typeof count !== 'number') return null
+  return { sections, section_count: count }
 }
 
 function isPreviewPayload(content: StudyTemplateContent | null | undefined): boolean {
@@ -37,11 +51,14 @@ export function useGatedContent(template: GeneratedTemplate | null | undefined) 
 
   const inline = template?.content ?? null
   const hasFullInline = Boolean(inline && !isPreviewPayload(inline))
+  const outline = getPublicSectionOutline(template)
   const preview: TemplatePreview = {
     title: template?.title,
     description: template?.description,
     summary: inline?.summary ?? (typeof template?.description === 'string' ? template.description : null),
     learning_objectives: inline?.learning_objectives ?? [],
+    sections: outline?.sections,
+    section_count: outline?.section_count,
   }
 
   useEffect(() => {
@@ -97,6 +114,8 @@ export function useGatedContent(template: GeneratedTemplate | null | undefined) 
     preview,
     content: isPreviewOnly ? null : content,
     generation: generation ?? template?.generation ?? null,
+    /** Locked-detail outline from public GET /templates/{id}; null when unlocked/catalog. */
+    sectionOutline: outline,
     access,
     loading,
     error,

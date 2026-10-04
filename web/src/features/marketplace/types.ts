@@ -1,4 +1,7 @@
 import type { Address } from 'viem'
+import type { PublicSectionRef } from '#/lib/api'
+
+export type { PublicSectionRef }
 
 /** Onchain TemplateMarketplace.Template struct. */
 export type OnchainTemplate = {
@@ -53,4 +56,14 @@ export type MarketplaceListFilters = {
   minPriceMon?: number
   maxPriceMon?: number
   forkedOnly?: boolean
+}
+
+/**
+ * Locked-detail outline from public GET /templates/{id}.
+ * Shape: `{ section_count: number, sections: [{ title: string | null }] }`
+ * Not present on GET /templates (catalog).
+ */
+export type PublicSectionOutline = {
+  section_count: number
+  sections: PublicSectionRef[]
 }

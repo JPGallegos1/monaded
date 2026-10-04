@@ -2,8 +2,8 @@
 
 Routes:
   GET  /health                     -> {"ok": true, "supabase": {...}, "gen": {...}, "privy": {...}}
-  GET  /templates                  -> {"templates": [...published templates...]} (preview content only)
-  GET  /templates/{id}             -> {"template": {...}} preview for public; full content for owner
+  GET  /templates                  -> {"templates": [...published templates...]} (preview; no section outline)
+  GET  /templates/{id}             -> public: preview + sections[{title}]/section_count; owner: full content
   GET  /templates/{id}/content     -> full content (session; owner or onchain hasLicense)
   POST /templates/{id}/fork        -> create draft fork with parent_template_id (session + license/owner)
   POST /users                      -> upsert a user by privy_user_id (legacy; prefer session)
@@ -964,8 +964,18 @@ class Default(WorkerEntrypoint):
             raise HttpError(404, "template not found")
         if is_owner:
             return self._json(request, {"template": public_template_view(row, include_full_content=True)})
-        # Published non-owners get preview here; full content via /content after license check.
-        return self._json(request, {"template": public_template_view(row, include_full_content=False)})
+        # Published non-owners: preview + title-only section outline for locked UI.
+        # Catalog (GET /templates) must not include sections/section_count.
+        return self._json(
+            request,
+            {
+                "template": public_template_view(
+                    row,
+                    include_full_content=False,
+                    include_section_outline=True,
+                )
+            },
+        )
 
     async def get_template_content(self, request, template_id):
         """Full content for creator (material owner) or wallet holding an onchain license."""

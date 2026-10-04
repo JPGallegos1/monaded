@@ -42,6 +42,12 @@ OWNER_TEMPLATE_FIELDS = PUBLIC_TEMPLATE_FIELDS + (
     "author_id",
 )
 
+# Derived public outline fields (detail only — never on GET /templates catalog).
+PUBLIC_SECTION_OUTLINE_FIELDS = ("sections", "section_count")
+
+# Max length for a public section title (truncate; never echo bodies).
+PUBLIC_SECTION_TITLE_MAX = 120
+
 
 def _pad_address(addr: str) -> str:
     a = addr.lower()
@@ -119,7 +125,11 @@ async def has_license(
 
 
 def build_preview_content(content: Optional[dict]) -> Optional[dict]:
-    """Strip full study content down to a public preview."""
+    """Strip full study content down to a public preview.
+
+    `content.sections` stays empty here — the locked detail outline is a separate
+    top-level allowlisted pair (`sections` / `section_count`) on the template.
+    """
     if not isinstance(content, dict):
         return None
     return {
@@ -132,6 +142,45 @@ def build_preview_content(content: Optional[dict]) -> Optional[dict]:
         "practice_questions": [],
         "diagrams": [],
     }
+
+
+def _coerce_public_section_title(value: Any) -> str | None:
+    """Non-strings → null; trim; truncate to PUBLIC_SECTION_TITLE_MAX."""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    if len(trimmed) > PUBLIC_SECTION_TITLE_MAX:
+        return trimmed[:PUBLIC_SECTION_TITLE_MAX]
+    return trimmed
+
+
+def build_public_section_outline(content: Optional[dict]) -> tuple[list[dict[str, str | None]], int]:
+    """Title-only section outline for locked template detail pages.
+
+    Each entry is a **fresh** allowlisted object ``{"title": str|null}`` — never a
+    shallow copy of the source section with fields deleted (so new generator keys
+    cannot leak). Content schema stores the section title as ``heading``; we also
+    accept ``title``. Bodies (`explanation`, etc.) are never used for the title.
+    """
+    if not isinstance(content, dict):
+        return [], 0
+    raw_sections = content.get("sections")
+    if not isinstance(raw_sections, list):
+        return [], 0
+
+    outline: list[dict[str, str | None]] = []
+    for item in raw_sections:
+        if not isinstance(item, dict):
+            outline.append({"title": None})
+            continue
+        # Allowlist read: title, else heading (canonical in study content). Never body.
+        title = _coerce_public_section_title(item.get("title"))
+        if title is None:
+            title = _coerce_public_section_title(item.get("heading"))
+        outline.append({"title": title})
+    return outline, len(outline)
 
 
 def _public_generation(gen: Any) -> dict | None:
@@ -149,6 +198,7 @@ def public_template_view(
     *,
     include_full_content: bool,
     include_full_generation: bool | None = None,
+    include_section_outline: bool = False,
 ) -> dict:
     """Return an allowlisted template payload (never the raw DB row).
 
@@ -156,6 +206,10 @@ def public_template_view(
     paths. License holders should pass `include_full_content=True` with
     `include_full_generation=False` so purchased study content is unlocked without
     leaking generation metadata that may echo source material.
+
+    `include_section_outline` adds top-level ``sections: [{title}]`` and
+    ``section_count`` for the **detail** public view only. Must stay False for
+    GET /templates (catalog).
     """
     fields = OWNER_TEMPLATE_FIELDS if include_full_content else PUBLIC_TEMPLATE_FIELDS
     out: dict[str, Any] = {k: row.get(k) for k in fields if k in row}
@@ -173,5 +227,10 @@ def public_template_view(
         pub_gen = _public_generation(row.get("generation"))
         if pub_gen is not None:
             out["generation"] = pub_gen
+
+    if include_section_outline:
+        sections, count = build_public_section_outline(raw_content)
+        out["sections"] = sections
+        out["section_count"] = count
 
     return out

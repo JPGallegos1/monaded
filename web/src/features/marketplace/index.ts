@@ -49,6 +49,8 @@ export type {
   BuyResult,
   PublishResult,
   MarketplaceListFilters,
+  PublicSectionRef,
+  PublicSectionOutline,
 } from './types'
 
 export { useOnchainTemplate } from './hooks/useOnchainTemplate'
@@ -63,4 +65,9 @@ export { PublishForm } from './components/PublishForm'
 export { BuyPanel } from './components/BuyPanel'
 export { SplitPreview } from './components/SplitPreview'
 export { LineageView, lineageToNodeData } from './components/LineageView'
-export { useGatedContent, GatedContentBanner } from './components/GatedContent'
+export {
+  useGatedContent,
+  GatedContentBanner,
+  getPublicSectionOutline,
+} from './components/GatedContent'
+export type { TemplatePreview } from './components/GatedContent'

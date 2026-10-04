@@ -1,10 +1,16 @@
 /**
  * Marketplace API helpers (same-origin `/api` proxy). Never call Supabase from web.
  */
-import { apiFetch, type GeneratedTemplate, type StudyTemplateContent, type Template } from '#/lib/api'
+import {
+  apiFetch,
+  type GeneratedTemplate,
+  type PublicSectionRef,
+  type StudyTemplateContent,
+  type Template,
+} from '#/lib/api'
 import { publishTemplate, verifyPurchase } from '#/lib/privy/session'
 
-export type { Template, GeneratedTemplate, StudyTemplateContent }
+export type { Template, GeneratedTemplate, StudyTemplateContent, PublicSectionRef }
 
 export type PublishApiResult = {
   ok: boolean

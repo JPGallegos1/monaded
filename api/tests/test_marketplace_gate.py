@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -13,8 +14,10 @@ sys.path.insert(0, str(SRC))
 from fork import ForkError, build_fork_rows  # noqa: E402
 from license_check import (  # noqa: E402
     OWNER_TEMPLATE_FIELDS,
+    PUBLIC_SECTION_TITLE_MAX,
     PUBLIC_TEMPLATE_FIELDS,
     build_preview_content,
+    build_public_section_outline,
     decode_bool_result,
     encode_has_license_call,
     public_template_view,
@@ -92,6 +95,8 @@ def test_public_template_view_allowlists_and_strips_private_fields():
     }
     gated = public_template_view(row, include_full_content=False)
     assert set(gated.keys()) <= set(PUBLIC_TEMPLATE_FIELDS) | {"content", "generation"}
+    assert "sections" not in gated
+    assert "section_count" not in gated
     assert "publish_claimed_at" not in gated
     assert "content_r2_key" not in gated
     assert "error" not in gated
@@ -203,3 +208,134 @@ def test_entry_fork_invokes_publish_rate_limits():
     fork_src = src[start : src.index(marker, start)] if marker in src[start:] else src[start : start + 2500]
     assert "_check_publish_rate_limits" in fork_src
     assert fork_src.index("_check_publish_rate_limits") < fork_src.index('insert("materials"')
+
+
+BODY_LEAK = "SECRET_SECTION_BODY_UNIQUE_XYZ_42"
+
+
+def _fixture_with_sections(**extra_section_fields):
+    return {
+        "id": "t1",
+        "title": "Public T",
+        "description": "desc",
+        "is_published": True,
+        "status": "ready",
+        "onchain_token_id": "1",
+        "content": {
+            "title": "Public T",
+            "summary": "Public summary only",
+            "learning_objectives": ["obj"],
+            "sections": [
+                {
+                    "heading": "Derivatives intro",
+                    "explanation": BODY_LEAK,
+                    "key_concepts": [BODY_LEAK],
+                    **extra_section_fields,
+                },
+                {
+                    "heading": "Limits",
+                    "explanation": f"more {BODY_LEAK}",
+                    "key_concepts": [],
+                },
+                {
+                    "heading": "",
+                    "explanation": BODY_LEAK,
+                    "key_concepts": [],
+                },
+                {
+                    "title": 123,  # non-string → null
+                    "heading": None,
+                    "explanation": BODY_LEAK,
+                },
+            ],
+            "definitions": [{"term": "x", "definition": BODY_LEAK}],
+            "worked_examples": [],
+            "practice_questions": [],
+            "diagrams": [],
+        },
+        "generation": {"model": "m", "usage": {"secret": BODY_LEAK}, "raw_prompt": BODY_LEAK},
+    }
+
+
+def test_public_detail_section_outline_titles_and_count():
+    row = _fixture_with_sections()
+    view = public_template_view(row, include_full_content=False, include_section_outline=True)
+    assert view["section_count"] == 4
+    assert view["sections"] == [
+        {"title": "Derivatives intro"},
+        {"title": "Limits"},
+        {"title": None},
+        {"title": None},
+    ]
+    # content.sections stays empty in preview; outline is top-level only
+    assert view["content"]["sections"] == []
+
+
+def test_public_detail_section_outline_never_leaks_body_text():
+    row = _fixture_with_sections(future_generator_field=BODY_LEAK)
+    view = public_template_view(row, include_full_content=False, include_section_outline=True)
+    blob = json.dumps(view)
+    assert BODY_LEAK not in blob
+    assert "explanation" not in blob
+    assert "key_concepts" not in blob
+    assert "raw_prompt" not in blob
+    assert view["generation"].get("usage") is None
+
+
+def test_public_section_outline_drops_unexpected_extra_fields():
+    """Fresh allowlisted objects only — never copy/delete from the source section."""
+    sections, count = build_public_section_outline(
+        {
+            "sections": [
+                {
+                    "heading": "Safe title",
+                    "explanation": BODY_LEAK,
+                    "mermaid": "graph TD; A-->B",
+                    "internal_id": "sec-9",
+                    "future_field": {"nested": BODY_LEAK},
+                }
+            ]
+        }
+    )
+    assert count == 1
+    assert sections == [{"title": "Safe title"}]
+    assert list(sections[0].keys()) == ["title"]
+
+
+def test_public_section_title_truncated_and_non_string_null():
+    long_title = "A" * (PUBLIC_SECTION_TITLE_MAX + 40)
+    sections, count = build_public_section_outline(
+        {
+            "sections": [
+                {"heading": long_title, "explanation": BODY_LEAK},
+                {"title": ["not", "a", "string"], "heading": 99, "explanation": BODY_LEAK},
+            ]
+        }
+    )
+    assert count == 2
+    assert sections[0]["title"] == "A" * PUBLIC_SECTION_TITLE_MAX
+    assert sections[1]["title"] is None
+
+
+def test_catalog_public_view_has_no_section_outline():
+    """GET /templates must not include sections / section_count."""
+    row = _fixture_with_sections()
+    catalog = public_template_view(row, include_full_content=False, include_section_outline=False)
+    assert "sections" not in catalog
+    assert "section_count" not in catalog
+
+    src = (Path(__file__).resolve().parents[1] / "src" / "entry.py").read_text(encoding="utf-8")
+    # Catalog builder must not request the outline.
+    start = src.index("async def templates")
+    end = src.index("async def ", start + 1)
+    catalog_src = src[start:end]
+    assert "include_section_outline" not in catalog_src
+    assert "public_template_view(r, include_full_content=False)" in catalog_src
+
+
+def test_entry_detail_requests_section_outline_for_public():
+    src = (Path(__file__).resolve().parents[1] / "src" / "entry.py").read_text(encoding="utf-8")
+    start = src.index("async def get_template")
+    end = src.index("async def get_template_content")
+    detail_src = src[start:end]
+    assert "include_section_outline=True" in detail_src
